@@ -7,6 +7,33 @@ import re
 IP   = "192.168.100.138"
 PORT = 443
 
+# ==================== COLORES ====================
+# =================================================
+
+# colores ANSI
+RESET    = "\033[0m"
+CYAN     = "\033[96m"    # prompt PS
+GREEN    = "\033[92m"    # conexión / mensajes de estado
+YELLOW   = "\033[93m"    # output general
+MAGENTA  = "\033[95m"    # directorios / paths en output
+RED      = "\033[91m"    # errores / desconexión
+
+# patrones para colorear el output
+DIR_LINE  = re.compile(r"^(d[-a-z]+)\s+")   # líneas de directorio (Mode)
+FILE_LINE = re.compile(r"^(-[-a-z]+)\s+")   # líneas de archivo
+
+def colorize_output(line: str) -> str:
+    """Colorea cada línea del output según su contenido."""
+    if DIR_LINE.match(line):
+        return f"{MAGENTA}{line}{RESET}"
+    if FILE_LINE.match(line):
+        return f"{YELLOW}{line}{RESET}"
+    if re.match(r"^(Mode|----)", line):
+        return f"{CYAN}{line}{RESET}"
+    return f"{YELLOW}{line}{RESET}"
+
+# =================== FIN COLORES =================
+# =================================================
 
 class Listener:
     def __init__(self):
@@ -14,9 +41,9 @@ class Listener:
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server_socket.bind((IP, PORT))
         self.server_socket.listen()
-        print(f"\n[+] Listening for incoming connections...")
+        print(f"\n{GREEN}[*] Listening for incoming connections...{RESET}")
         self.client_socket, self.client_address = self.server_socket.accept()
-        print(f"[+] Connection established by {self.client_address}\n")
+        print(f"{GREEN}[+] Connection established by {self.client_address}{RESET}\n")
 
         self._output_done = threading.Event()
         self._output_done.set()
@@ -67,11 +94,14 @@ class Listener:
                     continue
 
                 self._output_done.clear()
-                print(data.decode("cp850", errors="replace").replace("┬", ""), end="", flush=True)
+
+                decoded = data.decode("cp850", errors="replace").replace("┬", "")
+                colored = "\n".join(colorize_output(l) for l in decoded.splitlines())
+                print(colored, end="\n", flush=True)
 
             except (ConnectionError, OSError):
                 self._output_done.set()
-                print("\n[!] Cliente desconectado")
+                print(f"\n{RED}[!] Cliente desconectado{RESET}")
                 break
 
     def send_command(self, cmd: str):
@@ -86,7 +116,8 @@ class Listener:
         while True:
             try:
                 self._output_done.wait()
-                prompt = f"PS {self.current_path}> " if self.current_path else "PS> "
+                path  = self.current_path if self.current_path else ""
+                prompt = f"{CYAN}PS {MAGENTA}{path}{CYAN}>{RESET} "
                 cmd = input(prompt).strip()
                 if not cmd:
                     continue
