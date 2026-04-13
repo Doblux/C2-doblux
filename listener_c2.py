@@ -5,6 +5,7 @@ import threading
 import re
 import shlex
 import os
+from tqdm import tqdm
 
 IP   = "192.168.100.138"
 PORT = 443
@@ -160,13 +161,14 @@ class Listener:
             if os.path.exists(file_complete_path) and os.path.isfile(file_complete_path):
                 size = os.path.getsize(file_complete_path)
                 conn.sendall(struct.pack("Q", size))
-
-                with open(file_complete_path, "rb") as f:
-                    while True:
-                        chunk = f.read(4096)
-                        if not chunk:
-                            break
-                        conn.sendall(chunk)
+                with tqdm(total=size, unit="B", unit_scale=True, desc=file, colour="cyan") as bar:
+                    with open(file_complete_path, "rb") as f:
+                        while True:
+                            chunk = f.read(4096)
+                            if not chunk:
+                                break
+                            conn.sendall(chunk)
+                            bar.update(len(chunk))
             else:
                 conn.sendall(struct.pack("Q", 0)) # envio 0 para que el server no cuelge
         
@@ -202,12 +204,14 @@ class Listener:
             bytes_received = 0
             filename = file.split("\\")[-1].split("/")[-1]
             with open(filename, "wb") as f:
-                while bytes_received < file_size:
-                    chunk = conn.recv(min(4096, file_size - bytes_received))
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    bytes_received += len(chunk)
+                with tqdm(total=file_size, unit="B", unit_scale=True, desc=filename, colour="green") as bar:
+                    while bytes_received < file_size:
+                        chunk = conn.recv(min(4096, file_size - bytes_received))
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        bar.update(len(chunk))
+                        bytes_received += len(chunk)
             print(f"{GREEN}[+] {filename} descargado ({bytes_received} bytes){RESET}")
 
         conn.close()
