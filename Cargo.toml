@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "c2_server",
+    "c2_client",
+    "c2_shared",
+]
+resolver = "2"
