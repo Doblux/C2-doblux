@@ -10,7 +10,6 @@ use std::time::Duration;
 use tokio::time::{interval, MissedTickBehavior};
 
 /// Evento de entrada unificado: teclado o ratón.
-/// Reemplaza el canal anterior que solo llevaba KeyEvent.
 enum AppEvent {
     Key(event::KeyEvent),
     Mouse(event::MouseEvent),
@@ -24,7 +23,7 @@ async fn main() -> color_eyre::Result<()> {
     ratatui::crossterm::execute!(
         std::io::stdout(),
         ratatui::crossterm::terminal::EnterAlternateScreen,
-        event::EnableMouseCapture, // ← NUEVO: habilitamos captura de mouse junto con la terminal
+        event::EnableMouseCapture,
     )?;
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
 
@@ -36,8 +35,6 @@ async fn main() -> color_eyre::Result<()> {
     let mut app = App::new(puerto);
 
     let (tx_red, mut rx_red) = mpsc::channel(32);
-
-    // Canal unificado de eventos de entrada (antes era solo teclas)
     let (tx_input, mut rx_input) = mpsc::channel::<AppEvent>(32);
 
     // Servidor TCP en segundo plano
@@ -59,7 +56,7 @@ async fn main() -> color_eyre::Result<()> {
                         }
                     }
                 }
-                Ok(event::Event::Mouse(mouse)) => { // ← NUEVO
+                Ok(event::Event::Mouse(mouse)) => {
                     if tx_input.blocking_send(AppEvent::Mouse(mouse)).is_err() {
                         break;
                     }
@@ -74,7 +71,7 @@ async fn main() -> color_eyre::Result<()> {
 
     loop {
         tokio::select! {
-            // Eventos de red
+            // ── EVENTOS DE RED ────────────────────────────────────────────────
             Some(evento_red) = rx_red.recv() => {
                 match evento_red {
                     conn::ConnEvent::Connected(addr, stream) => {
@@ -85,52 +82,94 @@ async fn main() -> color_eyre::Result<()> {
                             app.remove_agent(index);
                         }
                     }
-                    // salida del shell del agente
                     conn::ConnEvent::Output(addr, data) => {
                         let addr_str = addr.to_string();
                         if let Some(agente) = app.agentes.iter_mut().find(|a| a.ip == addr_str) {
-                            // from_utf8_lossy nunca paniquea: bytes inválidos → '?'
-                            // replace '\r': evita que carriage returns sobreescriban la última línea visualmente
                             let texto = String::from_utf8_lossy(&data).replace('\r', "");
                             agente.terminal_output.push_str(&texto);
+                            // FIX: NO seteamos scroll_offset = u16::MAX aquí.
+                            // Cuando auto_scroll == true, ui::draw() calcula el offset
+                            // real en cada frame con compute_max_scroll(). Solo
+                            // mantenemos el flag; el render hace el resto.
                         }
                     }
                 }
             }
 
-            // Eventos de entrada (teclas + ratón)
+            // ── EVENTOS DE ENTRADA ────────────────────────────────────────────
             Some(evento_input) = rx_input.recv() => {
                 match evento_input {
 
-                    // ── RATÓN ────────────────────────────────────────────────────────────
+                    // ── RATÓN ─────────────────────────────────────────────────
                     AppEvent::Mouse(mouse) => {
-                        // Solo nos interesa el botón izquierdo presionado
-                        if let event::MouseEventKind::Down(event::MouseButton::Left) = mouse.kind {
-                            // Solo actuamos si hay agentes y no estamos en un modo especial
-                            if !app.agentes.is_empty() && !app.renaming && !app.ctrl_b_prefix {
-                                if let Some(rect) = app.send_button_rect.get() {
-                                    let dentro_del_boton = mouse.column >= rect.x
-                                        && mouse.column < rect.x + rect.width
-                                        && mouse.row >= rect.y
-                                        && mouse.row < rect.y + rect.height;
+                        match mouse.kind {
 
-                                    if dentro_del_boton {
-                                        if let Some(agente) = app.current_agent_mut() {
-                                            if let Err(e) = agente.send_input().await {
-                                                agente.terminal_output.push_str(
-                                                    &format!("[!] Error de envío: {e}\n")
-                                                );
-                                            }
-                                        }
-                                        app.force_cursor_visible();
+                            // ── Rueda arriba ──────────────────────────────────
+                            event::MouseEventKind::ScrollUp => {
+                                // Leemos el rect ANTES del borrow mutable del agente.
+                                // Cell::get() solo requiere &self, no hay conflicto.
+                                let rect = app.output_rect.get();
+                                if let Some(agente) = app.current_agent_mut() {
+                                    if agente.auto_scroll {
+                                        // FIX: si veníamos de auto_scroll, primero
+                                        // materializamos el offset real (máximo) antes
+                                        // de restar, para no partir de u16::MAX.
+                                        agente.scroll_offset = rect
+                                            .map(|r| ui::compute_max_scroll(&agente.terminal_output, r))
+                                            .unwrap_or(0);
+                                        agente.auto_scroll = false;
+                                    }
+                                    agente.scroll_offset = agente.scroll_offset.saturating_sub(3);
+                                }
+                            }
+
+                            // ── Rueda abajo ───────────────────────────────────
+                            event::MouseEventKind::ScrollDown => {
+                                let rect = app.output_rect.get();
+                                if let Some(agente) = app.current_agent_mut() {
+                                    // FIX: clampear al máximo real y reactivar auto_scroll
+                                    // si el usuario llega al fondo.
+                                    let max = rect
+                                        .map(|r| ui::compute_max_scroll(&agente.terminal_output, r))
+                                        .unwrap_or(0);
+                                    agente.scroll_offset =
+                                        agente.scroll_offset.saturating_add(3).min(max);
+                                    if agente.scroll_offset >= max {
+                                        agente.auto_scroll = true;
                                     }
                                 }
                             }
+
+                            // ── Click izquierdo (botón Enviar) ────────────────
+                            event::MouseEventKind::Down(event::MouseButton::Left) => {
+                                if !app.agentes.is_empty() && !app.renaming && !app.ctrl_b_prefix {
+                                    if let Some(rect) = app.send_button_rect.get() {
+                                        let dentro_del_boton = mouse.column >= rect.x
+                                            && mouse.column < rect.x + rect.width
+                                            && mouse.row >= rect.y
+                                            && mouse.row < rect.y + rect.height;
+
+                                        if dentro_del_boton {
+                                            if let Some(agente) = app.current_agent_mut() {
+                                                if let Err(e) = agente.send_input().await {
+                                                    agente.terminal_output.push_str(
+                                                        &format!("[!] Error de envío: {e}\n"),
+                                                    );
+                                                }
+                                            }
+                                            app.force_cursor_visible();
+                                        }
+                                    }
+                                }
+                            }
+
+                            _ => {}
                         }
                     }
 
-                    // ── TECLADO ──────────────────────────────────────────────────────────
+                    // ── TECLADO ───────────────────────────────────────────────
                     AppEvent::Key(key) => {
+
                         // --- Cancelar renaming con Esc ---
                         if app.renaming && key.code == event::KeyCode::Esc {
                             if let Some(agente) = app.current_agent_mut() {
@@ -174,7 +213,6 @@ async fn main() -> color_eyre::Result<()> {
                         // --- Prefijo Ctrl+B ---
                         if app.ctrl_b_prefix {
                             app.ctrl_b_prefix = false;
-
                             match key.code {
                                 event::KeyCode::Char('r') | event::KeyCode::Char('R') => {
                                     if let Some(agente) = app.current_agent_mut() {
@@ -210,7 +248,7 @@ async fn main() -> color_eyre::Result<()> {
                             continue;
                         }
 
-                        // --- Enviar con alt+Enter ──────────────────────────────────────────────────────────
+                        // --- Alt+Enter: enviar comando ───────────────────────
                         let es_alt_enter = key.modifiers.contains(event::KeyModifiers::ALT)
                             && key.code == event::KeyCode::Enter;
 
@@ -218,16 +256,19 @@ async fn main() -> color_eyre::Result<()> {
                             if let Some(agente) = app.current_agent_mut() {
                                 if let Err(e) = agente.send_input().await {
                                     agente.terminal_output.push_str(
-                                        &format!("[!] Error de envío: {e}\n")
+                                        &format!("[!] Error de envío: {e}\n"),
                                     );
                                 }
                             }
                             app.force_cursor_visible();
                             continue;
                         }
-                        // ──────────────────────────────────────────────────────────────────
 
-                        // --- Input del agente seleccionado ---
+                        // --- Input del agente seleccionado ──────────────────
+                        // Leemos output_rect ANTES del borrow mutable para usarlo
+                        // dentro de los arms de PageUp / PageDown.
+                        let output_rect_snap = app.output_rect.get();
+
                         if let Some(actual_agente) = app.current_agent_mut() {
                             match key.code {
                                 event::KeyCode::Char(c) => {
@@ -267,11 +308,24 @@ async fn main() -> color_eyre::Result<()> {
                                     app.force_cursor_visible();
                                 }
                                 event::KeyCode::Home => {
-                                    actual_agente.move_home();
+                                    if key.modifiers.contains(event::KeyModifiers::ALT) {
+                                        // Alt+Home → ir al principio del output
+                                        actual_agente.scroll_offset = 0;
+                                        actual_agente.auto_scroll = false;
+                                    } else {
+                                        actual_agente.move_home();
+                                    }
                                     app.force_cursor_visible();
                                 }
                                 event::KeyCode::End => {
-                                    actual_agente.move_end();
+                                    if key.modifiers.contains(event::KeyModifiers::ALT) {
+                                        // FIX: Alt+End → reactivar auto_scroll.
+                                        // ui::draw() calculará el offset real en el
+                                        // siguiente frame; no necesitamos u16::MAX.
+                                        actual_agente.auto_scroll = true;
+                                    } else {
+                                        actual_agente.move_end();
+                                    }
                                     app.force_cursor_visible();
                                 }
                                 event::KeyCode::Delete => {
@@ -282,6 +336,46 @@ async fn main() -> color_eyre::Result<()> {
                                     }
                                     app.force_cursor_visible();
                                 }
+
+                                // ── PageUp ────────────────────────────────────
+                                event::KeyCode::PageUp => {
+                                    // FIX: si veníamos de auto_scroll, materializamos
+                                    // el offset máximo real antes de restar, para no
+                                    // partir de u16::MAX y quedar en un valor enorme.
+                                    if actual_agente.auto_scroll {
+                                        actual_agente.scroll_offset = output_rect_snap
+                                            .map(|r| ui::compute_max_scroll(&actual_agente.terminal_output, r))
+                                            .unwrap_or(0);
+                                        actual_agente.auto_scroll = false;
+                                    }
+                                    // Desplazamiento = altura interna del panel (página completa),
+                                    // igual que en un terminal real (tmux, screen, etc.).
+                                    let page = output_rect_snap
+                                        .map(|r| r.height.saturating_sub(2).max(1))
+                                        .unwrap_or(10);
+                                    actual_agente.scroll_offset =
+                                        actual_agente.scroll_offset.saturating_sub(page);
+                                    app.force_cursor_visible();
+                                }
+
+                                // ── PageDown ──────────────────────────────────
+                                event::KeyCode::PageDown => {
+                                    // FIX: clampear al máximo y reactivar auto_scroll
+                                    // si el usuario llega al fondo.
+                                    let max = output_rect_snap
+                                        .map(|r| ui::compute_max_scroll(&actual_agente.terminal_output, r))
+                                        .unwrap_or(0);
+                                    let page = output_rect_snap
+                                        .map(|r| r.height.saturating_sub(2).max(1))
+                                        .unwrap_or(10);
+                                    actual_agente.scroll_offset =
+                                        actual_agente.scroll_offset.saturating_add(page).min(max);
+                                    if actual_agente.scroll_offset >= max {
+                                        actual_agente.auto_scroll = true;
+                                    }
+                                    app.force_cursor_visible();
+                                }
+
                                 _ => {}
                             }
                         }
@@ -289,7 +383,7 @@ async fn main() -> color_eyre::Result<()> {
                 } // fin match evento_input
             }
 
-            // 3. Tick del cursor (parpadeo)
+            // ── Tick del cursor (parpadeo) ─────────────────────────────────
             _ = tick.tick() => {
                 app.update_cursor_blink();
             }
@@ -303,12 +397,12 @@ async fn main() -> color_eyre::Result<()> {
         }
     }
 
-    // Restaurar terminal — siempre en el mismo orden inverso al setup
+    // Restaurar terminal
     ratatui::crossterm::terminal::disable_raw_mode()?;
     ratatui::crossterm::execute!(
         std::io::stdout(),
         ratatui::crossterm::terminal::LeaveAlternateScreen,
-        event::DisableMouseCapture, // par de EnableMouseCapture
+        event::DisableMouseCapture,
     )?;
     Ok(())
 }

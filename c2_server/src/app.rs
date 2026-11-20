@@ -18,13 +18,14 @@ pub struct App {
     pub last_blink: Instant,
     pub blink_interval: Duration,
     /// Rect del botón "Enviar", actualizado en cada frame por ui::draw.
-    /// Cell permite escritura a través de &App sin romper la firma de draw.  // ← NUEVO
     pub send_button_rect: Cell<Option<Rect>>,
+    /// Rect del panel de output de la terminal, actualizado en cada frame por ui::draw.
+    /// Permite que el event handler calcule compute_max_scroll sin necesitar acceso al Frame.
+    pub output_rect: Cell<Option<Rect>>,  // ← NUEVO
 }
 
 impl App {
     pub fn new(puerto: u16) -> Self {
-        // Inicializamos la App (arranca con 0 agentes para probar el estado de escucha)
         let banner = format!(
             r#"
 ██████╗ ██████╗     ██████╗  ██████╗ ██████╗ ██╗     ██╗   ██╗██╗  ██╗
@@ -49,7 +50,8 @@ impl App {
             cursor_visible: true,
             last_blink: Instant::now(),
             blink_interval: Duration::from_millis(530),
-            send_button_rect: Cell::new(None), // ← NUEVO
+            send_button_rect: Cell::new(None),
+            output_rect: Cell::new(None),  // ← NUEVO
         }
     }
 
@@ -59,9 +61,11 @@ impl App {
             nombre: format!("Agente-{}", addr),
             backup_nombre: None,
             stream,
-            terminal_input: String::new(), // ← antes: Vec::new()
+            terminal_input: String::new(),
             cursor_pos: 0,
             terminal_output: String::from("[*] Conexión establecida con éxito.\n"),
+            scroll_offset: 0,
+            auto_scroll: true,
         };
         self.agentes.push(nuevo_agente);
     }
@@ -69,9 +73,6 @@ impl App {
     pub fn remove_agent(&mut self, index: usize) {
         if index < self.agentes.len() {
             self.agentes.remove(index);
-
-            // Si borramos el agente que teníamos seleccionado y la lista queda vacía o nos pasamos de largo,
-            // ajustamos el índice de selección para que no dé un error de "Index Out of Bounds".
             if !self.agentes.is_empty() && self.agente_seleccionado >= self.agentes.len() {
                 self.agente_seleccionado = self.agentes.len() - 1;
             } else if self.agentes.is_empty() {
@@ -80,8 +81,6 @@ impl App {
         }
     }
 
-
-    // Devuelve una referencia al agente seleccionado actualmente de forma segura
     pub fn current_agent_mut(&mut self) -> Option<&mut Agente> {
         self.agentes.get_mut(self.agente_seleccionado)
     }
@@ -100,17 +99,16 @@ impl App {
 
     pub fn current_terminal_input(&self) -> String {
         if let Some(agente) = self.current_agent() {
-            agente.terminal_input.clone() // ← antes: agente.terminal_input.iter().collect()
+            agente.terminal_input.clone()
         } else {
             String::new()
         }
     }
 
-    pub fn quit(&mut self){
+    pub fn quit(&mut self) {
         self.should_quit = true;
     }
 
-    /// Llamar en cada frame / tick
     pub fn update_cursor_blink(&mut self) {
         if self.last_blink.elapsed() >= self.blink_interval {
             self.cursor_visible = !self.cursor_visible;
@@ -118,7 +116,6 @@ impl App {
         }
     }
 
-    /// Llamar siempre que el usuario escriba o mueva el cursor
     pub fn force_cursor_visible(&mut self) {
         self.cursor_visible = true;
         self.last_blink = Instant::now();
