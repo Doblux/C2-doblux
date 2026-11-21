@@ -223,7 +223,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     if app.show_ai_panel {
         let ai_content = if let Some(agente) = app.current_agent() {
             if agente.ai_loading {
-                "Analizando con Gemini...".to_string()
+                "Analizando...".to_string()
             } else if agente.ai_response.is_empty() {
                 "Presioná Ctrl+B → I para analizar la salida del agente.".to_string()
             } else {
@@ -234,7 +234,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         };
 
         let ai_paragraph = Paragraph::new(ai_content)
-            .block(Block::bordered().title(" IA (Gemini) "))
+            .block(Block::bordered().title(" IA "))
             .wrap(Wrap { trim: false });
 
         f.render_widget(ai_paragraph, chunks[2]);

@@ -35,10 +35,11 @@ async fn main() -> color_eyre::Result<()> {
 
     let mut app = App::new(puerto);
 
-    let ai = match AiAgent::from_env("gemini-3.8-flash") {
+    let ai = match AiAgent::from_env() {
         Ok(agent) => Some(agent),
         Err(e) => {
-            eprintln!("[AI] No se pudo inicializar Gemini: {e}");
+            eprintln!("[AI] No se pudo inicializar: {e}");
+            eprintln!("     Definí AI_API_KEY (y opcionalmente AI_BASE_URL / AI_MODEL)");
             None
         }
     };

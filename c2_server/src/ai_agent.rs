@@ -9,6 +9,7 @@ pub enum AiEvent {
 pub struct AiAgent {
     pub client: reqwest::Client,
     pub api_key: String,
+    pub base_url: String,   // ej: https://api.openai.com/v1  o  https://openrouter.ai/api/v1
     pub model: String,
     pub system_prompt: String,
     pub max_context_lines: usize,
@@ -18,33 +19,45 @@ pub struct AiAgent {
 impl AiAgent {
     pub fn new(
         api_key: impl Into<String>,
+        base_url: impl Into<String>,
         model: impl Into<String>,
     ) -> Self {
-        let http_client = reqwest::Client::new();
-        let default_system_prompt = String::from(
-            "Sos un copiloto técnico en una consola C2. Respondé en español, de forma breve, clara y directa: resumí qué muestra la salida reciente y qué conviene revisar o probar a continuación.",
-        );
-
         Self {
-            client: http_client,
+            client: reqwest::Client::new(),
             api_key: api_key.into(),
+            base_url: base_url.into().trim_end_matches('/').to_string(),
             model: model.into(),
-            system_prompt: default_system_prompt,
+            system_prompt: String::from(
+                "Sos un copiloto técnico en una consola C2. Respondé en español, de forma breve, clara y directa: resumí qué muestra la salida reciente y qué conviene revisar o probar a continuación.",
+            ),
             max_context_lines: 50,
-            request_timeout: Duration::from_secs(20),
+            request_timeout: Duration::from_secs(30),
         }
     }
 
-    pub fn from_env(model: impl Into<String>) -> Result<Self, String> {
-        let key_from_env = std::env::var("GEMINI_API_KEY")
-            .map_err(|_| String::from("Falta definir la variable de entorno GEMINI_API_KEY"))?;
+    /// Crea el agente desde variables de entorno o valores por defecto.
+    /// Variables soportadas:
+    ///   AI_API_KEY   (obligatoria)
+    ///   AI_BASE_URL  (default: https://api.openai.com/v1)
+    ///   AI_MODEL     (default: gpt-4o-mini)
+    pub fn from_env() -> Result<Self, String> {
+        let api_key = std::env::var("AI_API_KEY")
+            .or_else(|_| std::env::var("OPENAI_API_KEY"))
+            .map_err(|_| "Falta definir AI_API_KEY (o OPENAI_API_KEY)".to_string())?
+            .trim()
+            .to_string();
 
-        let trimmed_key = key_from_env.trim().to_string();
-        if trimmed_key.is_empty() {
-            return Err(String::from("La variable de entorno GEMINI_API_KEY está vacía"));
+        if api_key.is_empty() {
+            return Err("AI_API_KEY está vacía".into());
         }
 
-        Ok(Self::new(trimmed_key, model))
+        let base_url = std::env::var("AI_BASE_URL")
+            .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+
+        let model = std::env::var("AI_MODEL")
+            .unwrap_or_else(|_| "gpt-4o-mini".to_string());
+
+        Ok(Self::new(api_key, base_url, model))
     }
 
     pub fn request_analysis(
@@ -54,111 +67,86 @@ impl AiAgent {
         nombre: String,
         terminal_output: &str,
     ) {
-        let client_clone = self.client.clone();
-        let api_key_clone = self.api_key.clone();
-        let model_clone = self.model.clone();
-        let system_prompt_clone = self.system_prompt.clone();
+        let client = self.client.clone();
+        let api_key = self.api_key.clone();
+        let base_url = self.base_url.clone();
+        let model = self.model.clone();
+        let system_prompt = self.system_prompt.clone();
         let max_lines = self.max_context_lines;
-        let timeout_duration = self.request_timeout;
+        let timeout = self.request_timeout;
 
-        let recent_snippet = extract_recent_lines(terminal_output, max_lines);
+        let recent = extract_recent_lines(terminal_output, max_lines);
 
         tokio::spawn(async move {
-            let endpoint_url = format!(
-                "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
-                model_clone
-            );
+            let url = format!("{}/chat/completions", base_url);
 
-            let user_message = format!(
-                "Agente: {nombre} ({addr})\nSalida reciente de terminal:\n{recent_snippet}"
-            );
-
-            let request_payload = serde_json::json!({
-                "system_instruction": {
-                    "parts": [
-                        { "text": system_prompt_clone }
-                    ]
-                },
-                "contents": [
+            let payload = serde_json::json!({
+                "model": model,
+                "messages": [
+                    { "role": "system", "content": system_prompt },
                     {
                         "role": "user",
-                        "parts": [
-                            { "text": user_message }
-                        ]
+                        "content": format!(
+                            "Agente: {nombre} ({addr})\nSalida reciente de terminal:\n{recent}"
+                        )
                     }
-                ]
+                ],
+                "temperature": 0.3,
             });
 
-            let send_future = client_clone
-                .post(&endpoint_url)
-                .header("x-goog-api-key", &api_key_clone)
-                .json(&request_payload)
+            let send_fut = client
+                .post(&url)
+                .header("Authorization", format!("Bearer {api_key}"))
+                .header("Content-Type", "application/json")
+                .json(&payload)
                 .send();
 
-            let response_result = tokio::time::timeout(timeout_duration, send_future).await;
-
-            let http_response = match response_result {
+            let response = match tokio::time::timeout(timeout, send_fut).await {
                 Ok(Ok(resp)) => resp,
-                Ok(Err(network_err)) => {
-                    let msg = format!("Error de red al consultar Gemini: {network_err}");
-                    let _ = tx.send(AiEvent::Error { addr, err: msg }).await;
+                Ok(Err(e)) => {
+                    let _ = tx.send(AiEvent::Error {
+                        addr,
+                        err: format!("Error de red: {e}"),
+                    }).await;
                     return;
                 }
                 Err(_) => {
-                    let msg = format!(
-                        "Timeout tras {}s esperando respuesta de Gemini",
-                        timeout_duration.as_secs()
-                    );
-                    let _ = tx.send(AiEvent::Error { addr, err: msg }).await;
+                    let _ = tx.send(AiEvent::Error {
+                        addr,
+                        err: format!("Timeout tras {}s", timeout.as_secs()),
+                    }).await;
                     return;
                 }
             };
 
-            let status = http_response.status();
-            let body_text_result = http_response.text().await;
-
-            let body_text = match body_text_result {
-                Ok(txt) => txt,
-                Err(read_err) => {
-                    let msg = format!("Error leyendo cuerpo de respuesta: {read_err}");
-                    let _ = tx.send(AiEvent::Error { addr, err: msg }).await;
+            let status = response.status();
+            let body = match response.text().await {
+                Ok(t) => t,
+                Err(e) => {
+                    let _ = tx.send(AiEvent::Error {
+                        addr,
+                        err: format!("Error leyendo respuesta: {e}"),
+                    }).await;
                     return;
                 }
             };
 
             if !status.is_success() {
-                let api_err_msg = extract_gemini_error(&body_text)
-                    .unwrap_or_else(|| format!("HTTP {}: {}", status.as_u16(), body_text));
-                let _ = tx
-                    .send(AiEvent::Error {
-                        addr,
-                        err: api_err_msg,
-                    })
-                    .await;
+                let msg = extract_api_error(&body)
+                    .unwrap_or_else(|| format!("HTTP {}: {}", status.as_u16(), body));
+                let _ = tx.send(AiEvent::Error { addr, err: msg }).await;
                 return;
             }
 
-            let parsed_json: serde_json::Value = match serde_json::from_str(&body_text) {
-                Ok(val) => val,
-                Err(json_err) => {
-                    let msg = format!("Error parseando JSON de Gemini: {json_err}");
-                    let _ = tx.send(AiEvent::Error { addr, err: msg }).await;
-                    return;
-                }
-            };
-
-            match extract_gemini_text(&parsed_json) {
-                Some(ai_reply) => {
-                    let _ = tx
-                        .send(AiEvent::Response {
-                            addr,
-                            text: ai_reply,
-                        })
-                        .await;
+            match extract_openai_text(&body) {
+                Some(text) => {
+                    let _ = tx.send(AiEvent::Response { addr, text }).await;
                 }
                 None => {
-                    let msg = String::from("Gemini respondió sin contenido de texto en candidates.");
-                    let _ = tx.send(AiEvent::Error { addr, err: msg }).await;
+                    let _ = tx.send(AiEvent::Error {
+                        addr,
+                        err: "La respuesta no contenía texto útil".into(),
+                    }).await;
                 }
             }
         });
@@ -170,41 +158,27 @@ fn extract_recent_lines(text: &str, max_lines: usize) -> String {
         return String::new();
     }
     let lines: Vec<&str> = text.split('\n').collect();
-    let total = lines.len();
-    let start = total.saturating_sub(max_lines);
+    let start = lines.len().saturating_sub(max_lines);
     lines[start..].join("\n")
 }
 
-fn extract_gemini_text(json: &serde_json::Value) -> Option<String> {
-    let candidates = json.get("candidates")?.as_array()?;
-    let first_candidate = candidates.first()?;
-    let parts = first_candidate
+fn extract_openai_text(body: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    v.get("choices")?
+        .as_array()?
+        .first()?
+        .get("message")?
         .get("content")?
-        .get("parts")?
-        .as_array()?;
-
-    let mut collected_parts: Vec<String> = Vec::new();
-    for part in parts {
-        if let Some(part_text) = part.get("text").and_then(|v| v.as_str()) {
-            collected_parts.push(part_text.to_string());
-        }
-    }
-
-    if collected_parts.is_empty() {
-        None
-    } else {
-        Some(collected_parts.join(""))
-    }
+        .as_str()
+        .map(|s| s.trim().to_string())
 }
 
-fn extract_gemini_error(raw_body: &str) -> Option<String> {
-    let parsed: serde_json::Value = serde_json::from_str(raw_body).ok()?;
-    let err_obj = parsed.get("error")?;
-    let message = err_obj.get("message")?.as_str()?;
-    let code = err_obj
-        .get("code")
-        .and_then(|c| c.as_u64())
-        .map(|c| format!(" (código {c})"))
-        .unwrap_or_default();
-    Some(format!("API Gemini{code}: {message}"))
+fn extract_api_error(body: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    // Formato OpenAI clásico
+    if let Some(msg) = v.pointer("/error/message").and_then(|m| m.as_str()) {
+        return Some(msg.to_string());
+    }
+    // Algunos proveedores ponen el error en "message" raíz
+    v.get("message").and_then(|m| m.as_str()).map(|s| s.to_string())
 }
