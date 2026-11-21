@@ -1,6 +1,5 @@
 use ratatui::{prelude::*, widgets::*};
 use crate::app::App;
-use crate::theme::Theme;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SCROLL HELPERS
@@ -30,7 +29,7 @@ pub(crate) fn compute_max_scroll(text: &str, rect: Rect) -> u16 {
                     .unwrap_or(u16::MAX / 2)
             }
         })
-        .fold(0u16, |acc, l| acc.saturating_add(l));
+    .fold(0u16, |acc, l| acc.saturating_add(l));
     total_lines.saturating_sub(inner_height)
 }
 
@@ -56,7 +55,8 @@ fn spinner_char() -> &'static str {
 /// Punto de entrada del render.
 /// El `Theme` se recibe por referencia para aplicar estilos coherentes
 /// en cada widget sin hardcodear colores en este módulo.
-pub fn draw(f: &mut Frame, app: &App, theme: &Theme) {
+pub fn draw(f: &mut Frame, app: &App) {
+    let theme = &app.theme;
     app.send_button_rect.set(None);
 
     // ── Layout principal ──────────────────────────────────────────────────────
@@ -66,13 +66,13 @@ pub fn draw(f: &mut Frame, app: &App, theme: &Theme) {
             Constraint::Percentage(52),
             Constraint::Percentage(30),
         ])
-        .split(f.area())
+            .split(f.area())
     } else {
         Layout::horizontal([
             Constraint::Percentage(20),
             Constraint::Percentage(80),
         ])
-        .split(f.area())
+            .split(f.area())
     };
 
     // ── PANEL IZQUIERDO: lista de agentes ─────────────────────────────────────
@@ -87,8 +87,8 @@ pub fn draw(f: &mut Frame, app: &App, theme: &Theme) {
     let agentes_list = List::new(items)
         .block(
             Block::bordered()
-                .border_style(theme.border)
-                .title(Span::styled(" Agentes ", theme.title)),
+            .border_style(theme.border)
+            .title(Span::styled(" Agentes ", theme.title)),
         )
         .highlight_style(theme.highlight)
         .highlight_symbol("> ");
@@ -104,14 +104,14 @@ pub fn draw(f: &mut Frame, app: &App, theme: &Theme) {
         // Sin agentes: banner de bienvenida
         f.render_widget(
             Paragraph::new(app.current_terminal_output())
-                .block(
-                    Block::bordered()
-                        .border_style(theme.border)
-                        .title(Span::styled(" Terminal ", theme.title)),
-                )
-                .style(theme.banner)
-                .alignment(Alignment::Center)
-                .wrap(Wrap { trim: false }),
+            .block(
+                Block::bordered()
+                .border_style(theme.border)
+                .title(Span::styled(" Terminal ", theme.title)),
+            )
+            .style(theme.banner)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: false }),
             chunks[1],
         );
     } else {
@@ -126,7 +126,7 @@ pub fn draw(f: &mut Frame, app: &App, theme: &Theme) {
             Constraint::Min(0),
             Constraint::Length(input_height),
         ])
-        .split(chunks[1]);
+            .split(chunks[1]);
 
         // Guardamos el rect del panel de output para que el event-handler
         // pueda calcular compute_max_scroll sin acceso al Frame.
@@ -135,15 +135,17 @@ pub fn draw(f: &mut Frame, app: &App, theme: &Theme) {
         // ── Hint Ctrl+B en la barra inferior del bloque terminal ──────────────
         let bottom_title = if app.ctrl_b_prefix {
             Line::from(vec![
-                Span::styled(" Ctrl+B: ",     theme.help_key), // label del prefijo (bold)
-                Span::styled("↑/↓",           theme.help_key), // teclas de navegación
-                Span::styled(" Agente | ",    theme.help),     // separador
+                Span::styled(" Ctrl+B: ",     theme.help_key),
+                Span::styled("↑/↓",           theme.help_key),
+                Span::styled(" Agente | ",    theme.help),
                 Span::styled("R",             theme.help_key),
                 Span::styled(" Renombrar | ", theme.help),
                 Span::styled("I",             theme.help_key),
                 Span::styled(" Analizar | ",  theme.help),
                 Span::styled("A",             theme.help_key),
-                Span::styled(" IA ",          theme.help),
+                Span::styled(" IA | ",        theme.help),
+                Span::styled("T",             theme.help_key),
+                Span::styled(format!(" Tema ({}) ", theme.name), theme.help),
             ])
         } else {
             Line::from("")
@@ -156,23 +158,33 @@ pub fn draw(f: &mut Frame, app: &App, theme: &Theme) {
             } else {
                 agente.scroll_offset
             };
+            let lines: Vec<Line> = agente
+                .terminal_output
+                .split('\n')
+                .map(|line| {
+                    if line.contains("Conexión establecida") || line.contains("[FIN BINARIO]") {
+                        Line::from(Span::styled(line, theme.success))
+                    } else {
+                        Line::from(Span::styled(line, theme.output_text))
+                    }
+                })
+            .collect();
 
-            Paragraph::new(agente.terminal_output.as_str())
+            Paragraph::new(Text::from(lines))
                 .block(
                     Block::bordered()
-                        .border_style(theme.border)
-                        .title(Span::styled(" Terminal ", theme.title))
-                        .title_bottom(bottom_title),
+                    .border_style(theme.border)
+                    .title(Span::styled(" Terminal ", theme.title))
+                    .title_bottom(bottom_title),
                 )
-                .style(theme.output_text)
                 .wrap(Wrap { trim: false })
                 .scroll((display_scroll, 0))
         } else {
             Paragraph::new(app.current_terminal_output())
                 .block(
                     Block::bordered()
-                        .border_style(theme.border)
-                        .title(Span::styled(" Terminal ", theme.title)),
+                    .border_style(theme.border)
+                    .title(Span::styled(" Terminal ", theme.title)),
                 )
                 .style(theme.banner)
                 .alignment(Alignment::Center)
@@ -185,7 +197,7 @@ pub fn draw(f: &mut Frame, app: &App, theme: &Theme) {
             Constraint::Min(10),
             Constraint::Length(12),
         ])
-        .split(center_chunks[1]);
+            .split(center_chunks[1]);
 
         app.send_button_rect.set(Some(input_and_button[1]));
 
@@ -229,24 +241,24 @@ pub fn draw(f: &mut Frame, app: &App, theme: &Theme) {
 
         f.render_widget(
             input_widget
-                .block(
-                    Block::bordered()
-                        .border_style(theme.border)
-                        .title(Span::styled(" Input ", theme.title)),
-                )
-                .wrap(Wrap { trim: false }),
+            .block(
+                Block::bordered()
+                .border_style(theme.border)
+                .title(Span::styled(" Input ", theme.title)),
+            )
+            .wrap(Wrap { trim: false }),
             input_and_button[0],
         );
 
         // ── Botón Enviar ──────────────────────────────────────────────────────
         f.render_widget(
             Paragraph::new(Span::styled(" Enviar ", theme.button))
-                .block(
-                    Block::bordered()
-                        .border_style(theme.border)
-                        .title(Span::styled(" Acción ", theme.title)),
-                )
-                .alignment(Alignment::Center),
+            .block(
+                Block::bordered()
+                .border_style(theme.border)
+                .title(Span::styled(" Acción ", theme.title)),
+            )
+            .alignment(Alignment::Center),
             input_and_button[1],
         );
     }
@@ -287,6 +299,8 @@ pub fn draw(f: &mut Frame, app: &App, theme: &Theme) {
                     " Sin análisis.\n\n Presioná Ctrl+B → I para analizar la salida del agente seleccionado.".to_string(),
                     theme.help,
                 )
+            } else if agente.ai_response.starts_with("[Error IA]") {
+                (agente.ai_response.clone(), theme.error)
             } else {
                 (agente.ai_response.clone(), theme.ai_text)
             }
@@ -296,13 +310,13 @@ pub fn draw(f: &mut Frame, app: &App, theme: &Theme) {
 
         f.render_widget(
             Paragraph::new(ai_body)
-                .block(
-                    Block::bordered()
-                        .border_style(border_style)
-                        .title(Span::styled(ai_title, title_style)),
-                )
-                .style(body_style)
-                .wrap(Wrap { trim: false }),
+            .block(
+                Block::bordered()
+                .border_style(border_style)
+                .title(Span::styled(ai_title, title_style)),
+            )
+            .style(body_style)
+            .wrap(Wrap { trim: false }),
             chunks[2],
         );
     }
@@ -339,17 +353,17 @@ pub fn draw(f: &mut Frame, app: &App, theme: &Theme) {
 
         f.render_widget(
             Paragraph::new(nombre_actual)
-                .block(
-                    Block::bordered()
-                        // Borde y título del tema; fondo oscuro propio del popup
-                        .border_style(theme.border)
-                        .title(Span::styled(titulo, theme.title))
-                        .style(Style::default().bg(Color::Rgb(10, 12, 20))),
-                )
-                // Texto del nombre en color input_text del tema
-                .style(theme.input_text)
-                .alignment(Alignment::Left)
-                .wrap(Wrap { trim: false }),
+            .block(
+                Block::bordered()
+                // Borde y título del tema; fondo oscuro propio del popup
+                .border_style(theme.border)
+                .title(Span::styled(titulo, theme.title))
+                .style(Style::default().bg(Color::Rgb(10, 12, 20))),
+            )
+            // Texto del nombre en color input_text del tema
+            .style(theme.input_text)
+            .alignment(Alignment::Left)
+            .wrap(Wrap { trim: false }),
             area,
         );
     }
@@ -369,14 +383,14 @@ fn centered_rect_abs(width: u16, height: u16, r: Rect) -> Rect {
         Constraint::Length(safe_h),
         Constraint::Fill(1),
     ])
-    .split(r);
+        .split(r);
 
     Layout::horizontal([
         Constraint::Fill(1),
         Constraint::Length(safe_w),
         Constraint::Fill(1),
     ])
-    .split(vertical[1])[1]
+        .split(vertical[1])[1]
 }
 
 /// Inserta `\n` cada `width` chars para forzar wrap en la lista de agentes.

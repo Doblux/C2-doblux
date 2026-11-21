@@ -12,6 +12,7 @@ pub struct Agente {
     pub auto_scroll: bool,
     pub ai_response: String,
     pub ai_loading: bool,
+    pub binary_mode: bool,
 }
 
 impl Agente {
@@ -218,10 +219,113 @@ impl Agente {
         // así que no hace falta setearlo aquí.
         self.auto_scroll = true;
 
+        self.binary_mode = false;
         Ok(())
     }
 
+    pub fn append_terminal_output(&mut self, data: &[u8]) -> bool {
+        if data.is_empty() {
+            return false;
+        }
+
+        if Self::looks_binary(data) {
+            if !self.binary_mode {
+                self.binary_mode = true;
+                self.terminal_output.push_str(
+                    "\n[!] <BINARY> Stream binario detectado. Contenido omitido.\n\
+                     [!] <BINARY> Si esperabas texto, revisá tu comando (ej: no hagas `cat` de un binario).\n",
+                );
+            }
+            // Mientras dure el stream binario, no agregamos nada más.
+            return true;
+        }
+
+        // Volvimos a texto plano: si estábamos en binario, avisamos y salimos.
+        if self.binary_mode {
+            self.binary_mode = false;
+            self.terminal_output.push_str("\n[!] <FIN BINARIO> Volviendo a salida de texto.\n");
+        }
+
+        let texto = Self::bytes_to_terminal_text(data);
+        if texto.is_empty() {
+            return false;
+        }
+        self.terminal_output.push_str(&texto);
+        true
+    }
+
+
     // PRIVADO =====================================================================
+
+    fn looks_binary(data: &[u8]) -> bool {
+        if data.is_empty() {
+            return false;
+        }
+        if data.contains(&0u8) {
+            return true;
+        }
+        let non_printable = data
+            .iter()
+            .filter(|&&b| b < 8 || (b > 13 && b < 32) || b == 127)
+            .count();
+        let ratio = non_printable as f32 / data.len() as f32;
+        data.len() >= 16 && ratio > 0.25
+    }
+
+    /// Procesa bytes de texto: descarta ANSI/OSC, procesa `\b` y filtra `\r`.
+    fn bytes_to_terminal_text(data: &[u8]) -> String {
+        let lossy = String::from_utf8_lossy(data);
+        let mut out = String::with_capacity(lossy.len());
+        let mut chars = lossy.chars().peekable();
+
+        while let Some(c) = chars.next() {
+            match c {
+                '\n' | '\t' => out.push(c),
+                // NUEVO: descartamos '\r'. Un Paragraph de ratatui no puede
+                // sobreescribir una línea, así que dejarlo ensuciaría la salida
+                // con basura de las barras de progreso (curl, wget, etc.).
+                '\r' => { /* descartado */ }
+                '\u{0008}' => {
+                    if let Some(last) = out.chars().next_back() {
+                        if last != '\n' && last != '\r' {
+                            out.pop();
+                        }
+                    }
+                }
+                '\u{1b}' => {
+                    match chars.peek().copied() {
+                        Some('[') => {
+                            chars.next();
+                            while let Some(&n) = chars.peek() {
+                                chars.next();
+                                if n.is_ascii_alphabetic() || n == '~' {
+                                    break;
+                                }
+                            }
+                        }
+                        Some(']') => {
+                            chars.next();
+                            while let Some(n) = chars.next() {
+                                if n == '\u{0007}' {
+                                    break;
+                                }
+                                if n == '\u{1b}' && chars.peek() == Some(&'\\') {
+                                    chars.next();
+                                    break;
+                                }
+                            }
+                        }
+                        Some(_) => { chars.next(); }
+                        None => {}
+                    }
+                }
+                c if c.is_control() => out.push(' '),
+                c => out.push(c),
+            }
+        }
+        out
+    }
+
 
     fn line_start_at(&self, index: usize) -> usize {
         let clamped = index.min(self.terminal_input.len());

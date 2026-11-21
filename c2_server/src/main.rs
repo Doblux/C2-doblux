@@ -11,6 +11,7 @@ use std::env;
 use std::time::Duration;
 use tokio::time::{interval, MissedTickBehavior};
 use ai_agent::{AiAgent, AiEvent};
+
 /// Evento de entrada unificado: teclado o ratón.
 enum AppEvent {
     Key(event::KeyEvent),
@@ -35,7 +36,7 @@ async fn main() -> color_eyre::Result<()> {
         .unwrap_or(4444);
 
     let mut app = App::new(puerto);
-    let theme = theme::Theme::dark();
+
     let ai = match AiAgent::from_env() {
         Ok(agent) => Some(agent),
         Err(e) => {
@@ -99,12 +100,8 @@ async fn main() -> color_eyre::Result<()> {
                     conn::ConnEvent::Output(addr, data) => {
                         let addr_str = addr.to_string();
                         if let Some(agente) = app.agentes.iter_mut().find(|a| a.ip == addr_str) {
-                            let texto = String::from_utf8_lossy(&data).replace('\r', "");
-                            agente.terminal_output.push_str(&texto);
-                            // NO seteamos scroll_offset = u16::MAX aquí.
-                            // Cuando auto_scroll == true, ui::draw() calcula el offset
-                            // real en cada frame con compute_max_scroll(). Solo
-                            // mantenemos el flag; el render hace el resto.
+                            // Una sola llamada: maneja texto, binario y transiciones internamente.
+                            agente.append_terminal_output(&data);
                         }
                     }
                 }
@@ -289,6 +286,9 @@ async fn main() -> color_eyre::Result<()> {
                                         );
                                     }
                                 }
+                                event::KeyCode::Char('t') | event::KeyCode::Char('T') => {
+                                    app.next_theme();
+                                }
                                 _ => {}
                             }
                             continue;
@@ -444,7 +444,7 @@ async fn main() -> color_eyre::Result<()> {
         }
 
         // Dibujar
-        terminal.draw(|f| ui::draw(f, &app, &theme))?;
+        terminal.draw(|f| ui::draw(f, &app))?;
         if app.should_quit {
             break;
         }

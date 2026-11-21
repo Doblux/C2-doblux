@@ -1,16 +1,15 @@
 use std::cell::Cell;
 use ratatui::layout::Rect;
 
-use tokio::net::TcpStream;
 use std::net::SocketAddr;
 use crate::agente::Agente;
+use crate::theme::Theme;
 use std::time::{Duration, Instant};
 
 pub struct App {
     pub agentes: Vec<Agente>,
     pub agente_seleccionado: usize,
     pub should_quit: bool,
-    pub puerto: u16,
     pub banner: String,
     pub ctrl_b_prefix: bool,
     pub renaming: bool,
@@ -23,6 +22,8 @@ pub struct App {
     /// Permite que el event handler calcule compute_max_scroll sin necesitar acceso al Frame.
     pub output_rect: Cell<Option<Rect>>,
     pub show_ai_panel: bool,
+    pub theme: Theme,
+    pub theme_index: usize,
 }
 
 impl App {
@@ -40,13 +41,15 @@ impl App {
     [*] MÓDULO: C2 DOBLUX v0.1
     [*] ESPERANDO CONEXIONES DE AGENTES...
     "#, puerto);
+
+        let themes = Theme::all();
+
         Self {
             agentes: vec![],
             agente_seleccionado: 0,
             should_quit: false,
             ctrl_b_prefix: false,
             renaming: false,
-            puerto,
             banner,
             cursor_visible: true,
             last_blink: Instant::now(),
@@ -54,6 +57,8 @@ impl App {
             send_button_rect: Cell::new(None),
             output_rect: Cell::new(None),
             show_ai_panel: false,
+            theme: themes[0].clone(),
+            theme_index: 0,
         }
     }
 
@@ -70,6 +75,7 @@ impl App {
             auto_scroll: true,
             ai_response: String::new(),
             ai_loading: false,
+            binary_mode: false,
         };
         self.agentes.push(nuevo_agente);
     }
@@ -101,13 +107,13 @@ impl App {
         }
     }
 
-    pub fn current_terminal_input(&self) -> String {
+    /*pub fn current_terminal_input(&self) -> String {
         if let Some(agente) = self.current_agent() {
             agente.terminal_input.clone()
         } else {
             String::new()
         }
-    }
+    }*/
 
     pub fn quit(&mut self) {
         self.should_quit = true;
@@ -123,5 +129,11 @@ impl App {
     pub fn force_cursor_visible(&mut self) {
         self.cursor_visible = true;
         self.last_blink = Instant::now();
+    }
+    
+    pub fn next_theme(&mut self) {
+        let themes = Theme::all();
+        self.theme_index = (self.theme_index + 1) % themes.len();
+        self.theme = themes[self.theme_index].clone();
     }
 }
