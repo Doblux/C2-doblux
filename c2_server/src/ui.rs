@@ -1,5 +1,6 @@
-use ratatui::{layout::HorizontalAlignment::Center, prelude::*, widgets::*};
+use ratatui::{prelude::*, widgets::*};
 use crate::app::App;
+use crate::theme::Theme;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SCROLL HELPERS
@@ -12,98 +13,111 @@ use crate::app::App;
 /// La función replica la lógica interna de ratatui: divide por `\n` (no por
 /// `str::lines()`, que descarta el salto final) y hace ceil-division del ancho
 /// de cada línea lógica entre el ancho visible.
-///
-/// Esto se usa tanto en `draw()` (para calcular el offset de display cuando
-/// `auto_scroll == true`) como en el event-handler de main.rs (para clampar
-/// el offset manual al hacer scroll arriba/abajo).
 pub(crate) fn compute_max_scroll(text: &str, rect: Rect) -> u16 {
-    // Descontamos 1 celda por borde en cada eje.
     let inner_width = rect.width.saturating_sub(2) as usize;
     let inner_height = rect.height.saturating_sub(2);
-
-    if inner_width == 0 { return 0; }
-
-    // ratatui usa split('\n'), NO str::lines(): "abc\n".split('\n') = ["abc", ""]
-    // lo que produce una línea vacía extra al final, igual que lo que se renderiza.
+    if inner_width == 0 {
+        return 0;
+    }
     let total_lines: u16 = text
         .split('\n')
         .map(|line| {
             if line.is_empty() {
                 1u16
             } else {
-                // Ceil division: cuántas filas visuales necesita esta línea lógica.
                 let n = line.chars().count();
                 u16::try_from((n + inner_width - 1) / inner_width)
-                    .unwrap_or(u16::MAX / 2) // protección contra overflow
+                    .unwrap_or(u16::MAX / 2)
             }
         })
-    .fold(0u16, |acc, l| acc.saturating_add(l));
-
+        .fold(0u16, |acc, l| acc.saturating_add(l));
     total_lines.saturating_sub(inner_height)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SPINNER (animación de carga de la IA)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Devuelve el frame de spinner correspondiente al instante actual.
+/// Deriva el frame del tiempo de pared: rota ~8 fps sin estado extra en App.
+fn spinner_char() -> &'static str {
+    const FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as usize;
+    FRAMES[(ms / 120) % FRAMES.len()]
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DRAW
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub fn draw(f: &mut Frame, app: &App) {
+/// Punto de entrada del render.
+/// El `Theme` se recibe por referencia para aplicar estilos coherentes
+/// en cada widget sin hardcodear colores en este módulo.
+pub fn draw(f: &mut Frame, app: &App, theme: &Theme) {
     app.send_button_rect.set(None);
-    // output_rect se sobreescribirá más abajo si hay agentes; si no hay agentes
-    // lo dejamos como estaba (el handler lo ignorará porque current_agent es None).
 
+    // ── Layout principal ──────────────────────────────────────────────────────
     let chunks = if app.show_ai_panel {
-        // Agentes 18% | Terminal 52% | IA 30%
         Layout::horizontal([
             Constraint::Percentage(18),
             Constraint::Percentage(52),
             Constraint::Percentage(30),
-        ]).split(f.area())
+        ])
+        .split(f.area())
     } else {
-        // Agentes 20% | Terminal 80%  (sin panel de IA)
         Layout::horizontal([
             Constraint::Percentage(20),
             Constraint::Percentage(80),
-        ]).split(f.area())
+        ])
+        .split(f.area())
     };
 
-    // --- PANEL IZQUIERDO: lista de agentes ---
+    // ── PANEL IZQUIERDO: lista de agentes ─────────────────────────────────────
     let max_width = chunks[0].width.saturating_sub(4) as usize;
 
-    let items: Vec<ListItem> = app.agentes
+    let items: Vec<ListItem> = app
+        .agentes
         .iter()
-        .map(|agente| {
-            let wrapped_name = wrap_text(&agente.nombre, max_width);
-            ListItem::new(wrapped_name)
-        })
-    .collect();
+        .map(|agente| ListItem::new(wrap_text(&agente.nombre, max_width)))
+        .collect();
 
     let agentes_list = List::new(items)
-        .block(Block::bordered().title(" Agentes "))
-        .highlight_style(
-            Style::default()
-            .bg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD),
+        .block(
+            Block::bordered()
+                .border_style(theme.border)
+                .title(Span::styled(" Agentes ", theme.title)),
         )
+        .highlight_style(theme.highlight)
         .highlight_symbol("> ");
 
-    let mut state = ListState::default();
+    let mut list_state = ListState::default();
     if !app.agentes.is_empty() {
-        state.select(Some(app.agente_seleccionado));
+        list_state.select(Some(app.agente_seleccionado));
     }
-    f.render_stateful_widget(agentes_list, chunks[0], &mut state);
+    f.render_stateful_widget(agentes_list, chunks[0], &mut list_state);
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // --- PANEL CENTRAL ---
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── PANEL CENTRAL ─────────────────────────────────────────────────────────
     if app.agentes.is_empty() {
-        let welcome_text = Paragraph::new(app.current_terminal_output())
-            .block(Block::bordered().title(" Terminal "))
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: false });
-        f.render_widget(welcome_text, chunks[1]);
+        // Sin agentes: banner de bienvenida
+        f.render_widget(
+            Paragraph::new(app.current_terminal_output())
+                .block(
+                    Block::bordered()
+                        .border_style(theme.border)
+                        .title(Span::styled(" Terminal ", theme.title)),
+                )
+                .style(theme.banner)
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: false }),
+            chunks[1],
+        );
     } else {
-        // Altura dinámica del input según líneas con \n
-        let input_lines = app.current_agent()
+        // Altura dinámica del input (mínimo 3, máximo 10 filas)
+        let input_lines = app
+            .current_agent()
             .map(|a| a.terminal_input.chars().filter(|&c| c == '\n').count() + 1)
             .unwrap_or(1);
         let input_height = (input_lines as u16 + 2).clamp(3, 10);
@@ -111,33 +125,32 @@ pub fn draw(f: &mut Frame, app: &App) {
         let center_chunks = Layout::vertical([
             Constraint::Min(0),
             Constraint::Length(input_height),
-        ]).split(chunks[1]);
+        ])
+        .split(chunks[1]);
 
-        // ← Guardamos el rect del panel de output para que el event-handler
-        //   pueda calcular compute_max_scroll sin tener acceso al Frame.
+        // Guardamos el rect del panel de output para que el event-handler
+        // pueda calcular compute_max_scroll sin acceso al Frame.
         app.output_rect.set(Some(center_chunks[0]));
 
-        // ─── Título de ayuda Ctrl+B ───────────────────────────────────────
+        // ── Hint Ctrl+B en la barra inferior del bloque terminal ──────────────
         let bottom_title = if app.ctrl_b_prefix {
             Line::from(vec![
-                Span::styled(" Ctrl+B: ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::styled("↑/↓", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                Span::raw(" Agente | "),
-                Span::styled("R", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                Span::raw(" Renombrar | "),
-                Span::styled("A", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                Span::raw(" IA "),
+                Span::styled(" Ctrl+B: ",     theme.help_key), // label del prefijo (bold)
+                Span::styled("↑/↓",           theme.help_key), // teclas de navegación
+                Span::styled(" Agente | ",    theme.help),     // separador
+                Span::styled("R",             theme.help_key),
+                Span::styled(" Renombrar | ", theme.help),
+                Span::styled("I",             theme.help_key),
+                Span::styled(" Analizar | ",  theme.help),
+                Span::styled("A",             theme.help_key),
+                Span::styled(" IA ",          theme.help),
             ])
         } else {
             Line::from("")
         };
 
-        // ─── Terminal output ──────────────────────────────────────────────
-        let terminal_text = if let Some(agente) = app.current_agent() {
-            // FIX: cuando auto_scroll está activo calculamos el offset REAL
-            // en cada render en lugar de guardar u16::MAX en el agente.
-            // Esto garantiza que el Paragraph siempre muestre la última línea,
-            // incluso si el panel cambia de tamaño o llega nuevo output.
+        // ── Terminal output ───────────────────────────────────────────────────
+        let terminal_widget = if let Some(agente) = app.current_agent() {
             let display_scroll = if agente.auto_scroll {
                 compute_max_scroll(&agente.terminal_output, center_chunks[0])
             } else {
@@ -147,59 +160,67 @@ pub fn draw(f: &mut Frame, app: &App) {
             Paragraph::new(agente.terminal_output.as_str())
                 .block(
                     Block::bordered()
-                    .title(" Terminal ")
-                    .title_bottom(bottom_title),
+                        .border_style(theme.border)
+                        .title(Span::styled(" Terminal ", theme.title))
+                        .title_bottom(bottom_title),
                 )
+                .style(theme.output_text)
                 .wrap(Wrap { trim: false })
                 .scroll((display_scroll, 0))
         } else {
             Paragraph::new(app.current_terminal_output())
-                .block(Block::bordered().title(" Terminal "))
+                .block(
+                    Block::bordered()
+                        .border_style(theme.border)
+                        .title(Span::styled(" Terminal ", theme.title)),
+                )
+                .style(theme.banner)
                 .alignment(Alignment::Center)
                 .wrap(Wrap { trim: false })
         };
+        f.render_widget(terminal_widget, center_chunks[0]);
 
-        f.render_widget(terminal_text, center_chunks[0]);
-
-        // ─── Sub-layout inferior: input + botón ───────────────────────────
+        // ── Sub-layout inferior: input + botón ────────────────────────────────
         let input_and_button = Layout::horizontal([
             Constraint::Min(10),
             Constraint::Length(12),
-        ]).split(center_chunks[1]);
+        ])
+        .split(center_chunks[1]);
 
         app.send_button_rect.set(Some(input_and_button[1]));
 
-        // ─── Widget de input con cursor ───────────────────────────────────
-        let input_text = if let Some(agente) = app.current_agent() {
-            let text = &agente.terminal_input;
+        // ── Widget de input con cursor inline ─────────────────────────────────
+        let input_widget = if let Some(agente) = app.current_agent() {
+            let text   = &agente.terminal_input;
             let cursor = agente.cursor_pos;
+            let show   = app.cursor_visible;
+
             let mut lines: Vec<Line> = Vec::new();
-            let mut current_spans: Vec<Span> = Vec::new();
-            let show_cursor = app.cursor_visible;
+            let mut spans: Vec<Span> = Vec::new();
 
             for (byte_i, c) in text.char_indices() {
                 if c == '\n' {
-                    if byte_i == cursor && show_cursor {
-                        current_spans.push(Span::styled(
-                                " ",
-                                Style::default().bg(Color::White).fg(Color::Black),
-                        ));
+                    // Cursor sobre el salto de línea: bloque de un espacio
+                    if byte_i == cursor && show {
+                        spans.push(Span::styled(" ", theme.cursor));
                     }
-                    lines.push(Line::from(std::mem::take(&mut current_spans)));
-                } else if byte_i == cursor && show_cursor {
-                    current_spans.push(Span::styled(
-                            c.to_string(),
-                            Style::default().bg(Color::White).fg(Color::Black),
-                    ));
+                    lines.push(Line::from(std::mem::take(&mut spans)));
+                } else if byte_i == cursor && show {
+                    // Carácter bajo el cursor: fondo del tema de cursor
+                    spans.push(Span::styled(c.to_string(), theme.cursor));
                 } else {
-                    current_spans.push(Span::raw(c.to_string()));
+                    // Carácter normal de input
+                    spans.push(Span::styled(c.to_string(), theme.input_text));
                 }
             }
 
-            if cursor >= text.len() && show_cursor {
-                current_spans.push(Span::styled("█", Style::default().fg(Color::White)));
+            // Cursor más allá del último byte → bloque lleno al final.
+            // Usamos highlight_symbol (azul claro) para que sea visible
+            // sobre el fondo oscuro sin necesitar un campo extra en Theme.
+            if cursor >= text.len() && show {
+                spans.push(Span::styled("█", theme.highlight_symbol));
             }
-            lines.push(Line::from(current_spans));
+            lines.push(Line::from(spans));
 
             Paragraph::new(Text::from(lines))
         } else {
@@ -207,55 +228,103 @@ pub fn draw(f: &mut Frame, app: &App) {
         };
 
         f.render_widget(
-            input_text
-            .block(Block::bordered().title(" Input "))
-            .wrap(Wrap { trim: false }),
+            input_widget
+                .block(
+                    Block::bordered()
+                        .border_style(theme.border)
+                        .title(Span::styled(" Input ", theme.title)),
+                )
+                .wrap(Wrap { trim: false }),
             input_and_button[0],
         );
 
-        let send_button = Paragraph::new(" Enviar ")
-            .block(Block::bordered().title(" Acción "))
-            .alignment(Alignment::Center);
-        f.render_widget(send_button, input_and_button[1]);
+        // ── Botón Enviar ──────────────────────────────────────────────────────
+        f.render_widget(
+            Paragraph::new(Span::styled(" Enviar ", theme.button))
+                .block(
+                    Block::bordered()
+                        .border_style(theme.border)
+                        .title(Span::styled(" Acción ", theme.title)),
+                )
+                .alignment(Alignment::Center),
+            input_and_button[1],
+        );
     }
 
-    // ── PANEL DERECHO: IA (solo si está visible) ──────────────────────
+    // ── PANEL DERECHO: IA ─────────────────────────────────────────────────────
     if app.show_ai_panel {
-        let ai_content = if let Some(agente) = app.current_agent() {
-            if agente.ai_loading {
-                "Analizando...".to_string()
-            } else if agente.ai_response.is_empty() {
-                "Presioná Ctrl+B → I para analizar la salida del agente.".to_string()
-            } else {
-                agente.ai_response.clone()
-            }
+        let ai_loading = app.current_agent().map(|a| a.ai_loading).unwrap_or(false);
+
+        // Mientras carga: título con spinner + borde en ai_loading (amarillo).
+        // En reposo: title y border normales del tema.
+        let (title_style, border_style) = if ai_loading {
+            (theme.ai_loading, theme.ai_loading)
         } else {
-            "No hay agente seleccionado.".to_string()
+            (theme.title, theme.border)
         };
 
-        let ai_paragraph = Paragraph::new(ai_content)
-            .block(Block::bordered().title(" IA "))
-            .wrap(Wrap { trim: false });
+        let ai_title = if ai_loading {
+            format!(" IA {} ", spinner_char())
+        } else {
+            " IA ".to_string()
+        };
 
-        f.render_widget(ai_paragraph, chunks[2]);
+        // Contenido y estilo del cuerpo según estado de la IA
+        let (ai_body, body_style): (String, Style) = if let Some(agente) = app.current_agent() {
+            if agente.ai_loading {
+                // Muestra análisis previo mientras espera el nuevo (si existe)
+                let preview = if agente.ai_response.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n\n── Análisis anterior ──\n{}", agente.ai_response)
+                };
+                (
+                    format!("{} Analizando salida del agente...{}", spinner_char(), preview),
+                    theme.ai_loading,
+                )
+            } else if agente.ai_response.is_empty() {
+                (
+                    " Sin análisis.\n\n Presioná Ctrl+B → I para analizar la salida del agente seleccionado.".to_string(),
+                    theme.help,
+                )
+            } else {
+                (agente.ai_response.clone(), theme.ai_text)
+            }
+        } else {
+            (" Sin agente seleccionado.".to_string(), theme.help)
+        };
+
+        f.render_widget(
+            Paragraph::new(ai_body)
+                .block(
+                    Block::bordered()
+                        .border_style(border_style)
+                        .title(Span::styled(ai_title, title_style)),
+                )
+                .style(body_style)
+                .wrap(Wrap { trim: false }),
+            chunks[2],
+        );
     }
-    // ─────────────────────────────────────────────────────────────────────────
-    // POPUP: renombrar agente
-    // ─────────────────────────────────────────────────────────────────────────
-    if app.renaming {
-        let overlay = Block::default().style(Style::default().bg(Color::DarkGray));
-        f.render_widget(overlay, f.area());
 
-        let nombre_actual = app.current_agent()
+    // ── POPUP: renombrar agente ───────────────────────────────────────────────
+    if app.renaming {
+        // Overlay que oscurece el fondo (efecto de modal estándar en TUI)
+        f.render_widget(
+            Block::default().style(Style::default().bg(Color::DarkGray)),
+            f.area(),
+        );
+
+        let nombre_actual = app
+            .current_agent()
             .map(|a| format!("{}_", a.nombre))
             .unwrap_or_default();
 
-        let titulo = " Renombrar Agente (Enter: guardar, Esc: cancelar) ";
-
-        let ancho_maximo = (f.area().width as f32 * 0.8) as u16;
+        let titulo      = " Renombrar Agente (Enter: guardar, Esc: cancelar) ";
+        let ancho_max   = (f.area().width as f32 * 0.8) as u16;
         let ancho_titulo = titulo.len() as u16 + 4;
-        let ancho_texto = nombre_actual.len() as u16 + 4;
-        let ancho_popup = ancho_texto.max(ancho_titulo).min(ancho_maximo);
+        let ancho_texto  = nombre_actual.len() as u16 + 4;
+        let ancho_popup  = ancho_texto.max(ancho_titulo).min(ancho_max);
 
         let ancho_interno = ancho_popup.saturating_sub(2);
         let lineas = if ancho_interno > 0 {
@@ -266,18 +335,23 @@ pub fn draw(f: &mut Frame, app: &App) {
         let alto_popup = lineas + 2;
 
         let area = centered_rect_abs(ancho_popup, alto_popup, f.area());
-        f.render_widget(Clear, area);
+        f.render_widget(Clear, area); // limpia el overlay antes del popup
 
-        let popup_message = Paragraph::new(nombre_actual)
-            .block(
-                Block::bordered()
-                .title(titulo)
-                .style(Style::default().bg(Color::Black).fg(Color::White)),
-            )
-            .alignment(Alignment::Left)
-            .wrap(Wrap { trim: false });
-
-        f.render_widget(popup_message, area);
+        f.render_widget(
+            Paragraph::new(nombre_actual)
+                .block(
+                    Block::bordered()
+                        // Borde y título del tema; fondo oscuro propio del popup
+                        .border_style(theme.border)
+                        .title(Span::styled(titulo, theme.title))
+                        .style(Style::default().bg(Color::Rgb(10, 12, 20))),
+                )
+                // Texto del nombre en color input_text del tema
+                .style(theme.input_text)
+                .alignment(Alignment::Left)
+                .wrap(Wrap { trim: false }),
+            area,
+        );
     }
 }
 
@@ -285,6 +359,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 // FUNCIONES AUXILIARES
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Rectángulo centrado con dimensiones exactas (en caracteres).
 fn centered_rect_abs(width: u16, height: u16, r: Rect) -> Rect {
     let safe_w = width.min(r.width.saturating_sub(2)).max(12);
     let safe_h = height.min(r.height.saturating_sub(2)).max(3);
@@ -294,16 +369,18 @@ fn centered_rect_abs(width: u16, height: u16, r: Rect) -> Rect {
         Constraint::Length(safe_h),
         Constraint::Fill(1),
     ])
-        .split(r);
+    .split(r);
 
     Layout::horizontal([
         Constraint::Fill(1),
         Constraint::Length(safe_w),
         Constraint::Fill(1),
     ])
-        .split(vertical[1])[1]
+    .split(vertical[1])[1]
 }
 
+/// Inserta `\n` cada `width` chars para forzar wrap en la lista de agentes.
+/// Necesario porque `List` de ratatui no hace wrap automático de items largos.
 fn wrap_text(text: &str, width: usize) -> String {
     if width == 0 {
         return text.to_string();

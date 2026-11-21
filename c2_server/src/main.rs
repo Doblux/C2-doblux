@@ -3,6 +3,7 @@ mod ui;
 mod conn;
 mod agente;
 mod ai_agent;
+mod theme;
 use ratatui::{prelude::*, crossterm::event};
 use app::App;
 use tokio::sync::mpsc;
@@ -34,7 +35,7 @@ async fn main() -> color_eyre::Result<()> {
         .unwrap_or(4444);
 
     let mut app = App::new(puerto);
-
+    let theme = theme::Theme::dark();
     let ai = match AiAgent::from_env() {
         Ok(agent) => Some(agent),
         Err(e) => {
@@ -443,8 +444,7 @@ async fn main() -> color_eyre::Result<()> {
         }
 
         // Dibujar
-        terminal.draw(|f| ui::draw(f, &app))?;
-
+        terminal.draw(|f| ui::draw(f, &app, &theme))?;
         if app.should_quit {
             break;
         }
