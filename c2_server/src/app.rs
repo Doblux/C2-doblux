@@ -21,7 +21,8 @@ pub struct App {
     pub send_button_rect: Cell<Option<Rect>>,
     /// Rect del panel de output de la terminal, actualizado en cada frame por ui::draw.
     /// Permite que el event handler calcule compute_max_scroll sin necesitar acceso al Frame.
-    pub output_rect: Cell<Option<Rect>>,  // ← NUEVO
+    pub output_rect: Cell<Option<Rect>>,
+    pub show_ai_panel: bool,
 }
 
 impl App {
@@ -51,7 +52,8 @@ impl App {
             last_blink: Instant::now(),
             blink_interval: Duration::from_millis(530),
             send_button_rect: Cell::new(None),
-            output_rect: Cell::new(None),  // ← NUEVO
+            output_rect: Cell::new(None),
+            show_ai_panel: false,
         }
     }
 
@@ -66,6 +68,8 @@ impl App {
             terminal_output: String::from("[*] Conexión establecida con éxito.\n"),
             scroll_offset: 0,
             auto_scroll: true,
+            ai_response: String::new(),
+            ai_loading: false,
         };
         self.agentes.push(nuevo_agente);
     }

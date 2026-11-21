@@ -10,6 +10,8 @@ pub struct Agente {
     pub cursor_pos: usize,
     pub scroll_offset: u16,
     pub auto_scroll: bool,
+    pub ai_response: String,
+    pub ai_loading: bool,
 }
 
 impl Agente {

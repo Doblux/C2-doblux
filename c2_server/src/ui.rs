@@ -37,7 +37,7 @@ pub(crate) fn compute_max_scroll(text: &str, rect: Rect) -> u16 {
                     .unwrap_or(u16::MAX / 2) // protección contra overflow
             }
         })
-        .fold(0u16, |acc, l| acc.saturating_add(l));
+    .fold(0u16, |acc, l| acc.saturating_add(l));
 
     total_lines.saturating_sub(inner_height)
 }
@@ -51,11 +51,20 @@ pub fn draw(f: &mut Frame, app: &App) {
     // output_rect se sobreescribirá más abajo si hay agentes; si no hay agentes
     // lo dejamos como estaba (el handler lo ignorará porque current_agent es None).
 
-    let chunks = Layout::horizontal([
-        Constraint::Percentage(25),
-        Constraint::Percentage(50),
-        Constraint::Percentage(25),
-    ]).split(f.area());
+    let chunks = if app.show_ai_panel {
+        // Agentes 18% | Terminal 52% | IA 30%
+        Layout::horizontal([
+            Constraint::Percentage(18),
+            Constraint::Percentage(52),
+            Constraint::Percentage(30),
+        ]).split(f.area())
+    } else {
+        // Agentes 20% | Terminal 80%  (sin panel de IA)
+        Layout::horizontal([
+            Constraint::Percentage(20),
+            Constraint::Percentage(80),
+        ]).split(f.area())
+    };
 
     // --- PANEL IZQUIERDO: lista de agentes ---
     let max_width = chunks[0].width.saturating_sub(4) as usize;
@@ -66,14 +75,14 @@ pub fn draw(f: &mut Frame, app: &App) {
             let wrapped_name = wrap_text(&agente.nombre, max_width);
             ListItem::new(wrapped_name)
         })
-        .collect();
+    .collect();
 
     let agentes_list = List::new(items)
         .block(Block::bordered().title(" Agentes "))
         .highlight_style(
             Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("> ");
 
@@ -138,8 +147,8 @@ pub fn draw(f: &mut Frame, app: &App) {
             Paragraph::new(agente.terminal_output.as_str())
                 .block(
                     Block::bordered()
-                        .title(" Terminal ")
-                        .title_bottom(bottom_title),
+                    .title(" Terminal ")
+                    .title_bottom(bottom_title),
                 )
                 .wrap(Wrap { trim: false })
                 .scroll((display_scroll, 0))
@@ -172,15 +181,15 @@ pub fn draw(f: &mut Frame, app: &App) {
                 if c == '\n' {
                     if byte_i == cursor && show_cursor {
                         current_spans.push(Span::styled(
-                            " ",
-                            Style::default().bg(Color::White).fg(Color::Black),
+                                " ",
+                                Style::default().bg(Color::White).fg(Color::Black),
                         ));
                     }
                     lines.push(Line::from(std::mem::take(&mut current_spans)));
                 } else if byte_i == cursor && show_cursor {
                     current_spans.push(Span::styled(
-                        c.to_string(),
-                        Style::default().bg(Color::White).fg(Color::Black),
+                            c.to_string(),
+                            Style::default().bg(Color::White).fg(Color::Black),
                     ));
                 } else {
                     current_spans.push(Span::raw(c.to_string()));
@@ -199,8 +208,8 @@ pub fn draw(f: &mut Frame, app: &App) {
 
         f.render_widget(
             input_text
-                .block(Block::bordered().title(" Input "))
-                .wrap(Wrap { trim: false }),
+            .block(Block::bordered().title(" Input "))
+            .wrap(Wrap { trim: false }),
             input_and_button[0],
         );
 
@@ -210,9 +219,26 @@ pub fn draw(f: &mut Frame, app: &App) {
         f.render_widget(send_button, input_and_button[1]);
     }
 
-    // --- PANEL DERECHO: IA (placeholder) ---
-    f.render_widget(Block::bordered().title(" IA "), chunks[2]);
+    // ── PANEL DERECHO: IA (solo si está visible) ──────────────────────
+    if app.show_ai_panel {
+        let ai_content = if let Some(agente) = app.current_agent() {
+            if agente.ai_loading {
+                "Analizando con Gemini...".to_string()
+            } else if agente.ai_response.is_empty() {
+                "Presioná Ctrl+B → I para analizar la salida del agente.".to_string()
+            } else {
+                agente.ai_response.clone()
+            }
+        } else {
+            "No hay agente seleccionado.".to_string()
+        };
 
+        let ai_paragraph = Paragraph::new(ai_content)
+            .block(Block::bordered().title(" IA (Gemini) "))
+            .wrap(Wrap { trim: false });
+
+        f.render_widget(ai_paragraph, chunks[2]);
+    }
     // ─────────────────────────────────────────────────────────────────────────
     // POPUP: renombrar agente
     // ─────────────────────────────────────────────────────────────────────────
@@ -245,8 +271,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         let popup_message = Paragraph::new(nombre_actual)
             .block(
                 Block::bordered()
-                    .title(titulo)
-                    .style(Style::default().bg(Color::Black).fg(Color::White)),
+                .title(titulo)
+                .style(Style::default().bg(Color::Black).fg(Color::White)),
             )
             .alignment(Alignment::Left)
             .wrap(Wrap { trim: false });
@@ -268,14 +294,14 @@ fn centered_rect_abs(width: u16, height: u16, r: Rect) -> Rect {
         Constraint::Length(safe_h),
         Constraint::Fill(1),
     ])
-    .split(r);
+        .split(r);
 
     Layout::horizontal([
         Constraint::Fill(1),
         Constraint::Length(safe_w),
         Constraint::Fill(1),
     ])
-    .split(vertical[1])[1]
+        .split(vertical[1])[1]
 }
 
 fn wrap_text(text: &str, width: usize) -> String {

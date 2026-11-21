@@ -2,13 +2,14 @@ mod app;
 mod ui;
 mod conn;
 mod agente;
+mod ai_agent;
 use ratatui::{prelude::*, crossterm::event};
 use app::App;
 use tokio::sync::mpsc;
 use std::env;
 use std::time::Duration;
 use tokio::time::{interval, MissedTickBehavior};
-
+use ai_agent::{AiAgent, AiEvent};
 /// Evento de entrada unificado: teclado o ratón.
 enum AppEvent {
     Key(event::KeyEvent),
@@ -33,6 +34,17 @@ async fn main() -> color_eyre::Result<()> {
         .unwrap_or(4444);
 
     let mut app = App::new(puerto);
+
+    let ai = match AiAgent::from_env("gemini-3.8-flash") {
+        Ok(agent) => Some(agent),
+        Err(e) => {
+            eprintln!("[AI] No se pudo inicializar Gemini: {e}");
+            None
+        }
+    };
+
+    let (tx_ai, mut rx_ai) = mpsc::channel::<AiEvent>(8);
+
 
     let (tx_red, mut rx_red) = mpsc::channel(32);
     let (tx_input, mut rx_input) = mpsc::channel::<AppEvent>(32);
@@ -87,10 +99,28 @@ async fn main() -> color_eyre::Result<()> {
                         if let Some(agente) = app.agentes.iter_mut().find(|a| a.ip == addr_str) {
                             let texto = String::from_utf8_lossy(&data).replace('\r', "");
                             agente.terminal_output.push_str(&texto);
-                            // FIX: NO seteamos scroll_offset = u16::MAX aquí.
+                            // NO seteamos scroll_offset = u16::MAX aquí.
                             // Cuando auto_scroll == true, ui::draw() calcula el offset
                             // real en cada frame con compute_max_scroll(). Solo
                             // mantenemos el flag; el render hace el resto.
+                        }
+                    }
+                }
+            }
+
+            // Eventos de Inteligencia Artificial ------------------------------------------------------------
+            Some(ai_event) = rx_ai.recv() => {
+                match ai_event {
+                    AiEvent::Response { addr, text } => {
+                        if let Some(agente) = app.agentes.iter_mut().find(|a| a.ip == addr) {
+                            agente.ai_response = text;
+                            agente.ai_loading = false;
+                        }
+                    }
+                    AiEvent::Error { addr, err } => {
+                        if let Some(agente) = app.agentes.iter_mut().find(|a| a.ip == addr) {
+                            agente.ai_response = format!("[Error IA] {err}");
+                            agente.ai_loading = false;
                         }
                     }
                 }
@@ -111,7 +141,7 @@ async fn main() -> color_eyre::Result<()> {
                                 let rect = app.output_rect.get();
                                 if let Some(agente) = app.current_agent_mut() {
                                     if agente.auto_scroll {
-                                        // FIX: si veníamos de auto_scroll, primero
+                                        // si veníamos de auto_scroll, primero
                                         // materializamos el offset real (máximo) antes
                                         // de restar, para no partir de u16::MAX.
                                         agente.scroll_offset = rect
@@ -127,7 +157,7 @@ async fn main() -> color_eyre::Result<()> {
                             event::MouseEventKind::ScrollDown => {
                                 let rect = app.output_rect.get();
                                 if let Some(agente) = app.current_agent_mut() {
-                                    // FIX: clampear al máximo real y reactivar auto_scroll
+                                    // clampear al máximo real y reactivar auto_scroll
                                     // si el usuario llega al fondo.
                                     let max = rect
                                         .map(|r| ui::compute_max_scroll(&agente.terminal_output, r))
@@ -221,7 +251,7 @@ async fn main() -> color_eyre::Result<()> {
                                     }
                                 }
                                 event::KeyCode::Char('a') | event::KeyCode::Char('A') => {
-                                    // Futuro popup de IA
+                                    app.show_ai_panel = !app.show_ai_panel;
                                 }
                                 event::KeyCode::Up => {
                                     if app.agente_seleccionado > 0 {
@@ -233,6 +263,28 @@ async fn main() -> color_eyre::Result<()> {
                                         && app.agente_seleccionado < app.agentes.len() - 1
                                     {
                                         app.agente_seleccionado += 1;
+                                    }
+                                }
+                                event::KeyCode::Char('i') | event::KeyCode::Char('I') => {
+                                    if let (Some(ai_agent), Some(agente)) = (&ai, app.current_agent()) {
+                                        // 1. Clonamos todo lo que necesitamos del agente
+                                        let ip = agente.ip.clone();
+                                        let nombre = agente.nombre.clone();
+                                        let output = agente.terminal_output.clone();
+
+                                        // 2. Ahora sí podemos pedir el borrow mutable (el inmutable ya no vive)
+                                        if let Some(ag) = app.current_agent_mut() {
+                                            ag.ai_loading = true;
+                                            ag.ai_response = String::from("Analizando...");
+                                        }
+
+                                        // 3. Llamamos a Gemini con los clones
+                                        ai_agent.request_analysis(
+                                            tx_ai.clone(),
+                                            ip,
+                                            nombre,
+                                            &output,
+                                        );
                                     }
                                 }
                                 _ => {}
@@ -319,7 +371,7 @@ async fn main() -> color_eyre::Result<()> {
                                 }
                                 event::KeyCode::End => {
                                     if key.modifiers.contains(event::KeyModifiers::ALT) {
-                                        // FIX: Alt+End → reactivar auto_scroll.
+                                        // Alt+End → reactivar auto_scroll.
                                         // ui::draw() calculará el offset real en el
                                         // siguiente frame; no necesitamos u16::MAX.
                                         actual_agente.auto_scroll = true;
@@ -339,7 +391,7 @@ async fn main() -> color_eyre::Result<()> {
 
                                 // ── PageUp ────────────────────────────────────
                                 event::KeyCode::PageUp => {
-                                    // FIX: si veníamos de auto_scroll, materializamos
+                                    // si veníamos de auto_scroll, materializamos
                                     // el offset máximo real antes de restar, para no
                                     // partir de u16::MAX y quedar en un valor enorme.
                                     if actual_agente.auto_scroll {
@@ -360,7 +412,7 @@ async fn main() -> color_eyre::Result<()> {
 
                                 // ── PageDown ──────────────────────────────────
                                 event::KeyCode::PageDown => {
-                                    // FIX: clampear al máximo y reactivar auto_scroll
+                                    // clampear al máximo y reactivar auto_scroll
                                     // si el usuario llega al fondo.
                                     let max = output_rect_snap
                                         .map(|r| ui::compute_max_scroll(&actual_agente.terminal_output, r))
