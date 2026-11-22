@@ -1,10 +1,11 @@
-use std::cell::Cell;
+use std::{cell::Cell, vec};
 use ratatui::layout::Rect;
 
 use std::net::SocketAddr;
 use crate::agente::Agente;
 use crate::theme::Theme;
 use std::time::{Duration, Instant};
+use std::collections::VecDeque;
 
 pub struct App {
     pub agentes: Vec<Agente>,
@@ -76,6 +77,8 @@ impl App {
             ai_response: String::new(),
             ai_loading: false,
             binary_mode: false,
+            history: VecDeque::new(),
+            history_index: 0,
         };
         self.agentes.push(nuevo_agente);
     }

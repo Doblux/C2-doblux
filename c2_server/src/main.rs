@@ -318,6 +318,34 @@ async fn main() -> color_eyre::Result<()> {
                             continue;
                         }
 
+                        let es_alt_up = key.modifiers.contains(event::KeyModifiers::ALT)
+                            && key.code == event::KeyCode::Up;
+
+                        if es_alt_up {
+                            if let Some(agente) = app.current_agent_mut() {
+                                if let Some(cmd) = agente.history_up() {
+                                    agente.terminal_input = cmd;
+                                    // Mover el cursor al final del comando recuperado
+                                    agente.cursor_pos = agente.terminal_input.len();
+                                }
+                            }
+                            app.force_cursor_visible();
+                            continue;
+                        }
+
+                        let es_alt_down = key.modifiers.contains(event::KeyModifiers::ALT)
+                            && key.code == event::KeyCode::Down;
+
+                        if es_alt_down {
+                            if let Some(agente) = app.current_agent_mut() {
+                                if let Some(cmd) = agente.history_down() {
+                                    agente.terminal_input = cmd;
+                                    agente.cursor_pos = agente.terminal_input.len();
+                                }
+                            }
+                            app.force_cursor_visible();
+                            continue;
+                        }
                         // --- Input del agente seleccionado ──────────────────
                         // Leemos output_rect ANTES del borrow mutable para usarlo
                         // dentro de los arms de PageUp / PageDown.

@@ -1,4 +1,5 @@
 use tokio::io::AsyncWriteExt;
+use std::collections::VecDeque;
 
 pub struct Agente {
     pub ip: String,
@@ -13,6 +14,8 @@ pub struct Agente {
     pub ai_response: String,
     pub ai_loading: bool,
     pub binary_mode: bool,
+    pub history: VecDeque<String>,
+    pub history_index: usize,
 }
 
 impl Agente {
@@ -20,6 +23,36 @@ impl Agente {
     pub fn insert_char(&mut self, c: char) {
         self.terminal_input.insert(self.cursor_pos, c);
         self.cursor_pos += c.len_utf8();
+    }
+
+    pub fn history_up(&mut self) -> Option<String> {
+        if self.history.is_empty() {
+            return None;
+        }
+        // Nos movemos hacia atrás (hacia comandos más viejos)
+        // Solo restamos si no estamos ya en el primer comando (índice 0)
+        if self.history_index > 0 {
+            self.history_index -= 1;
+        }
+        self.history.get(self.history_index).cloned()
+    }
+
+    pub fn history_down(&mut self) -> Option<String> {
+        if self.history.is_empty() {
+            return None;
+        }
+        // Nos movemos hacia adelante (hacia comandos más nuevos o el prompt vacío)
+        // Solo sumamos si no estamos ya en el prompt vacío (índice == len)
+        if self.history_index < self.history.len() {
+            self.history_index += 1;
+        }
+        
+        // Si llegamos al final, significa que estamos en la "línea en blanco" actual
+        if self.history_index == self.history.len() {
+            Some(String::new())
+        } else {
+            self.history.get(self.history_index).cloned()
+        }
     }
 
     /// Elimina el carácter anterior al cursor (Backspace).
@@ -201,6 +234,18 @@ impl Agente {
             return Ok(());
         }
 
+        let cmd = self.terminal_input.trim().to_string();
+        if matches!(cmd.as_str(), "clear" | "cls") {
+            self.terminal_output.clear();
+            self.scroll_offset = 0;
+            self.auto_scroll   = true;
+            self.binary_mode   = false;
+            self.terminal_input.clear();
+            self.cursor_pos = 0;
+            self.guardar_en_historial(cmd);
+            return Ok(());
+        }
+
         let mut payload = self.terminal_input.clone();
         if !payload.ends_with('\n') {
             payload.push('\n');
@@ -208,19 +253,32 @@ impl Agente {
 
         self.stream.write_all(payload.as_bytes()).await?;
 
-        let texto_enviado = self.terminal_input.trim_end_matches('\n');
-        self.terminal_output.push_str(&format!("[>] {texto_enviado}\n"));
+        let texto_enviado = self.terminal_input.trim_end_matches('\n').to_string();
+        self.terminal_output.push_str(&format!("[>] {}\n", texto_enviado));
+
+        self.guardar_en_historial(texto_enviado);
 
         self.terminal_input.clear();
         self.cursor_pos = 0;
-
-        // ← FIX: bajar al final siempre al enviar, para ver el eco y la respuesta.
-        // scroll_offset es ignorado por ui.rs mientras auto_scroll == true,
-        // así que no hace falta setearlo aquí.
         self.auto_scroll = true;
-
         self.binary_mode = false;
         Ok(())
+    }
+
+    pub fn guardar_en_historial(&mut self, texto_enviado: String){
+        const MAX_HISTORY: usize = 100;
+
+        if !texto_enviado.is_empty() {
+            self.history.push_back(texto_enviado); // O(1)
+
+            // Si nos pasamos del límite, sacamos el más viejo del frente en O(1)
+            // arreglo circular
+            if self.history.len() > MAX_HISTORY {
+                self.history.pop_front(); // O(1) (magia del VecDeque)
+            }
+            // Reseteamos el índice al final para el próximo comando
+            self.history_index = self.history.len();
+        }
     }
 
     pub fn append_terminal_output(&mut self, data: &[u8]) -> bool {
