@@ -1,6 +1,6 @@
 use ratatui::{prelude::*, widgets::*};
 use crate::app::App;
-
+use crate::markdown::render_markdown;
 // ─────────────────────────────────────────────────────────────────────────────
 // SCROLL HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
@@ -267,8 +267,6 @@ pub fn draw(f: &mut Frame, app: &App) {
     if app.show_ai_panel {
         let ai_loading = app.current_agent().map(|a| a.ai_loading).unwrap_or(false);
 
-        // Mientras carga: título con spinner + borde en ai_loading (amarillo).
-        // En reposo: title y border normales del tema.
         let (title_style, border_style) = if ai_loading {
             (theme.ai_loading, theme.ai_loading)
         } else {
@@ -281,44 +279,51 @@ pub fn draw(f: &mut Frame, app: &App) {
             " IA ".to_string()
         };
 
-        // Contenido y estilo del cuerpo según estado de la IA
-        let (ai_body, body_style): (String, Style) = if let Some(agente) = app.current_agent() {
+        let ai_block = Block::bordered()
+            .border_style(border_style)
+            .title(Span::styled(ai_title, title_style));
+
+        let ai_widget = if let Some(agente) = app.current_agent() {
             if agente.ai_loading {
-                // Muestra análisis previo mientras espera el nuevo (si existe)
                 let preview = if agente.ai_response.is_empty() {
                     String::new()
                 } else {
                     format!("\n\n── Análisis anterior ──\n{}", agente.ai_response)
                 };
-                (
-                    format!("{} Analizando salida del agente...{}", spinner_char(), preview),
-                    theme.ai_loading,
-                )
+                Paragraph::new(format!(
+                        "{} Analizando salida del agente...{}",
+                        spinner_char(),
+                        preview
+                ))
+                    .block(ai_block)
+                    .style(theme.ai_loading)
+                    .wrap(Wrap { trim: false })
             } else if agente.ai_response.is_empty() {
-                (
-                    " Sin análisis.\n\n Presioná Ctrl+B → I para analizar la salida del agente seleccionado.".to_string(),
-                    theme.help,
+                Paragraph::new(
+                    " Sin análisis.\n\n Presioná Ctrl+B → I para analizar la salida del agente seleccionado.",
                 )
+                    .block(ai_block)
+                    .style(theme.help)
+                    .wrap(Wrap { trim: false })
             } else if agente.ai_response.starts_with("[Error IA]") {
-                (agente.ai_response.clone(), theme.error)
+                Paragraph::new(agente.ai_response.clone())
+                    .block(ai_block)
+                    .style(theme.error)
+                    .wrap(Wrap { trim: false })
             } else {
-                (agente.ai_response.clone(), theme.ai_text)
+                // Sin .style() aquí: render_markdown ya estiliza cada Span.
+                Paragraph::new(render_markdown(&agente.ai_response, theme))
+                    .block(ai_block)
+                    .wrap(Wrap { trim: false })
             }
         } else {
-            (" Sin agente seleccionado.".to_string(), theme.help)
+            Paragraph::new(" Sin agente seleccionado.")
+                .block(ai_block)
+                .style(theme.help)
+                .wrap(Wrap { trim: false })
         };
 
-        f.render_widget(
-            Paragraph::new(ai_body)
-            .block(
-                Block::bordered()
-                .border_style(border_style)
-                .title(Span::styled(ai_title, title_style)),
-            )
-            .style(body_style)
-            .wrap(Wrap { trim: false }),
-            chunks[2],
-        );
+        f.render_widget(ai_widget, chunks[2]);
     }
 
     // ── POPUP: renombrar agente ───────────────────────────────────────────────

@@ -4,6 +4,7 @@ mod conn;
 mod agente;
 mod ai_agent;
 mod theme;
+mod markdown;
 use ratatui::{prelude::*, crossterm::event};
 use app::App;
 use tokio::sync::mpsc;
